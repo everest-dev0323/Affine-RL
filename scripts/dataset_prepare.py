@@ -352,7 +352,7 @@ def main():
     parser.add_argument(
         "--input_dir",
         type=str,
-        default="./datasets/rollouts_test",
+        default="./datasets/rollouts",
         help="Input directory containing rollout .jsonl files"
     )
     parser.add_argument(
