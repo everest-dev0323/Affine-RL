@@ -477,6 +477,9 @@ class SGRPOTrainer:
                 if gpu_stats:
                     log_dict.update(gpu_stats)
                 wandb.log(log_dict, step=global_step)
+            
+            if global_step % self.args.save_steps == 0 and self.accelerator.is_main_process:
+                self.save_checkpoint(global_step, checkpoint_name=f"checkpoint-{global_step}")
 
         # Close progress bar
         pbar.close()
@@ -655,7 +658,7 @@ class SGRPOTrainingArguments:
 
     # Logging and checkpointing
     logging_steps: int = 10  # Log metrics every N steps
-    save_steps: int = 100  # Save checkpoint every N steps
+    save_steps: int = 10  # Save checkpoint every N steps
     eval_steps: int = 100  # Run evaluation every N steps
     report_to: str = "wandb"  # Logging backend (wandb, tensorboard, none)
     run_name: str = "qwen3-sgrpo"  # Name for the training run
