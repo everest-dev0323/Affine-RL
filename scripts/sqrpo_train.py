@@ -208,12 +208,77 @@ class SGRPOTrainer:
         advantages = (rewards - mean) / std
         return advantages
 
+    def _build_completion_mask(self, conversations, device):
+        """
+        Build a completion mask for assistant responses in a conversation.
+
+        The mask marks which tokens belong to assistant responses (value 1)
+        vs user messages/system prompts (value 0). This allows computing
+        log probabilities only for the tokens we want to train on.
+
+        Args:
+            conversations: List of conversation turns with "role" field
+            device: Device to place the mask tensor on
+
+        Returns:
+            Tuple of (input_ids, completion_mask) where completion_mask has
+            pattern like [0, 0, ..., 1, 1, ..., 0, 0, ..., 1, 1, ...]
+            marking assistant response tokens with 1.
+        """
+        if conversations and conversations[-1].get('role') == 'user':
+            conversations = conversations[:-1]
+            
+        # Tokenize full conversation
+        input_ids = self.tokenizer.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_tensors="pt",
+            enable_thinking=True
+        ).to(device)
+
+        # Clip input if it exceeds max_input_length
+        if input_ids.shape[1] > self.args.max_input_length:
+            input_ids = input_ids[:, :self.args.max_input_length]
+
+        seq_len = input_ids.shape[1]
+        completion_mask = torch.zeros(1, seq_len, dtype=torch.float32, device=device)
+
+        # Find boundaries of each assistant response
+        for index in range(len(conversations)):
+            if (index > 1 or len(conversations) == 2) and conversations[index]["role"] == "assistant":
+                # Get token position where this assistant response starts
+                # by tokenizing conversation up to (but not including) this turn
+                prefix_len = len(self.tokenizer.apply_chat_template(
+                    conversations[:index],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    enable_thinking=False
+                ))
+
+                # Get token position where this assistant response ends
+                # by tokenizing conversation up to and including this turn
+                suffix_len = len(self.tokenizer.apply_chat_template(
+                    conversations[:index + 1],
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    enable_thinking=True if index == len(conversations) - 1 else False
+                ))
+
+                # Mark assistant tokens in the mask
+                # Note: We mark from prefix_len to suffix_len (exclusive)
+                completion_mask[0, prefix_len:suffix_len] = 1.0
+
+        return input_ids, completion_mask
+
     def compute_log_probs(self, model, trajectories, requires_grad=True):
         """
         Compute log probabilities for assistant responses in trajectories.
 
-        For each trajectory, computes the sum of log probabilities for all
-        assistant turns, which is used for policy gradient estimation.
+        This memory-efficient implementation processes each trajectory in a single
+        forward pass using a completion mask, instead of iterating through each
+        assistant turn separately. The completion mask marks assistant response
+        tokens (1) vs other tokens (0), allowing selective log prob computation.
 
         Args:
             model: The language model to compute log probs with
@@ -223,57 +288,38 @@ class SGRPOTrainer:
         Returns:
             List of total log probability for each trajectory
         """
-        all_log_probs = []  # FIX: Renamed to avoid collision with logits variable
+        all_log_probs = []
         device = next(model.parameters()).device
 
         for traj in trajectories:
-            log_prob = torch.tensor(0.0, device=device, requires_grad=requires_grad)
+            conversations = traj["conversations"]
 
-            for index in range(len(traj["conversations"])):
-                # Compute log probs for assistant responses only (skip system/first user)
-                if index > 1 and traj["conversations"][index]["role"] == "assistant":
-                    # Tokenize conversation up to current turn (including current assistant response)
-                    input_ids = self.tokenizer.apply_chat_template(
-                        traj["conversations"][:index + 1],  # FIX: Include current response
-                        tokenize=True,
-                        add_generation_prompt=False,
-                        return_tensors="pt",  # FIX: Return as tensor
-                        enable_thinking=True
-                    ).to(device)
+            # Build input_ids and completion mask for the entire conversation
+            input_ids, completion_mask = self._build_completion_mask(conversations, device)
+            attention_mask = torch.ones_like(input_ids)
 
-                    attention_mask = torch.ones_like(input_ids)
+            # Single forward pass for entire conversation
+            with torch.set_grad_enabled(requires_grad):
+                outputs = model(input_ids, attention_mask=attention_mask, return_dict=True)
+                logits = outputs.logits
 
-                    # Get prompt length (conversation before assistant response)
-                    prompt_len = len(self.tokenizer.apply_chat_template(
-                        traj["conversations"][:index],
-                        tokenize=True,
-                        add_generation_prompt=True,
-                        enable_thinking=False
-                    ))
+                # Shift for next-token prediction: logits[:-1] predict labels[1:]
+                shift_logits = logits[:, :-1].contiguous()
+                shift_labels = input_ids[:, 1:].contiguous()
+                shift_completion_mask = completion_mask[:, 1:].contiguous()
 
-                    # Forward pass to get logits
-                    outputs = model(input_ids, attention_mask=attention_mask, return_dict=True)
-                    logits = outputs.logits  # FIX: Use different variable name
+                # Compute log softmax and gather log probs for actual tokens
+                token_log_probs = F.log_softmax(shift_logits, dim=-1)
+                selected_log_probs = token_log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
 
-                    # Shift logits and labels for next-token prediction
-                    # We only want the response portion, not the prompt
-                    shift_logits = logits[:, prompt_len:-1].contiguous()
-                    shift_labels = input_ids[:, prompt_len + 1:].contiguous()
-                    shift_attention_mask = attention_mask[:, prompt_len + 1:].contiguous()
-
-                    # Compute log softmax and gather log probs for actual tokens
-                    token_log_probs = F.log_softmax(shift_logits, dim=-1)
-                    selected_log_probs = token_log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
-
-                    # Sum log probs for this response (masked by attention)
-                    response_log_prob = torch.sum(selected_log_probs * shift_attention_mask)
-                    log_prob = log_prob + response_log_prob
-
-                    # Free intermediate tensors to reduce GPU memory
-                    del outputs, logits, shift_logits, token_log_probs, selected_log_probs
-                    del input_ids, attention_mask, shift_labels, shift_attention_mask
+                # Sum log probs only for assistant response tokens (masked by completion_mask)
+                log_prob = torch.sum(selected_log_probs * shift_completion_mask)
 
             all_log_probs.append(log_prob)
+
+            # Free intermediate tensors to reduce GPU memory
+            del outputs, logits, shift_logits, token_log_probs, selected_log_probs
+            del input_ids, attention_mask, shift_labels, shift_completion_mask, completion_mask
 
         return all_log_probs
     
@@ -297,79 +343,107 @@ class SGRPOTrainer:
         """
         clip_grad_norm = self.args.clip_grad_norm
         self.model.train()
-        self.optimizer.zero_grad()
 
         epoch_losses = []
         epoch_policy_losses = []
         epoch_kl_divs = []
         epoch_rewards = []
 
-        for task in self.train_dataset.shuffle():
+        # Create tqdm progress bar for step-based logging
+        dataset_shuffled = self.train_dataset.shuffle()
+        total_steps = len(dataset_shuffled)
+        pbar = tqdm(
+            dataset_shuffled,
+            desc=f"Epoch {epoch}",
+            total=total_steps,
+            disable=not self.accelerator.is_main_process,
+            dynamic_ncols=True
+        )
+
+        for task in pbar:
             step_start_time = time.time()
 
-            # FIX: sorted() returns a new list; list.sort() returns None
-            history = sorted(task["history"], key=lambda x: x["reward"])
+            # Use accelerator.accumulate() for proper gradient accumulation
+            # This context manager handles:
+            # - Skipping optimizer.step() and zero_grad() on accumulation steps
+            # - Executing them only after gradient_accumulation_steps iterations
+            # - Proper loss scaling
+            with self.accelerator.accumulate(self.model):
+                if self.accelerator.sync_gradients:
+                    allocated = torch.cuda.memory_allocated(self.accelerator.device) / (1024**3)
+                    reserved = torch.cuda.memory_reserved(self.accelerator.device) / (1024**3)
+                    max_alloc = torch.cuda.max_memory_allocated(self.accelerator.device) / (1024**3)
+                    self.accelerator.print(f"[MEM] allocated={allocated:.2f}GB reserved={reserved:.2f}GB max_alloc={max_alloc:.2f}GB")
+                # FIX: sorted() returns a new list; list.sort() returns None
+                history = sorted(task["history"], key=lambda x: x["reward"])
 
-            # Sample trajectories for this training step
-            # Ensure we don't sample more than available
-            num_samples = min(self.args.num_generations, len(history))
-            trajectories = random.sample(history, num_samples)
+                # Sample trajectories for this training step
+                # Ensure we don't sample more than available
+                num_samples = min(self.args.num_generations, len(history))
+                trajectories = random.sample(history, num_samples)
 
-            # Track rewards for logging
-            step_rewards = [traj["reward"] for traj in trajectories]
-            epoch_rewards.extend(step_rewards)
+                # Track rewards for logging
+                step_rewards = [traj["reward"] for traj in trajectories]
+                epoch_rewards.extend(step_rewards)
 
-            # Compute normalized advantages across sampled trajectories
-            # Move to device and detach since advantages are not part of the computation graph
-            device = next(self.model.parameters()).device
-            advantages = self.compute_advantages(trajectories).to(device).detach()
+                # Compute normalized advantages across sampled trajectories
+                # Move to device and detach since advantages are not part of the computation graph
+                device = next(self.model.parameters()).device
+                advantages = self.compute_advantages(trajectories).to(device).detach()
 
-            # Compute log probabilities under current policy
-            current_log_probs = self.compute_log_probs(self.model, trajectories, requires_grad=True)
+                # Compute log probabilities under current policy
+                current_log_probs = self.compute_log_probs(self.model, trajectories, requires_grad=True)
 
-            # Compute log probabilities under reference policy (frozen base model)
-            # This is used for KL divergence computation
-            with torch.no_grad():
-                ref_log_probs = self.compute_log_probs(self.model.base_model, trajectories, requires_grad=False)
+                # Compute log probabilities under reference policy (frozen base model)
+                # This is used for KL divergence computation
+                with torch.no_grad():
+                    ref_log_probs = self.compute_log_probs(self.model.base_model, trajectories, requires_grad=False)
 
-            # Stack log probs into tensors for vectorized computation
-            current_log_probs = torch.stack(current_log_probs)
-            ref_log_probs = torch.stack(ref_log_probs).detach()  # Ensure ref is detached
+                # Stack log probs into tensors for vectorized computation
+                current_log_probs = torch.stack(current_log_probs)
+                ref_log_probs = torch.stack(ref_log_probs).detach()  # Ensure ref is detached
 
-            # Compute KL divergence (approximated as log ratio)
-            kl_div = current_log_probs - ref_log_probs
+                # Compute KL divergence (approximated as log ratio)
+                kl_div = current_log_probs - ref_log_probs
 
-            # Compute probability ratio for importance sampling
-            ratio = torch.exp(kl_div)
+                # Compute probability ratio for importance sampling
+                ratio = torch.exp(kl_div)
 
-            # PPO-style clipped surrogate objective
-            # surr1: unclipped objective
-            # surr2: clipped objective to prevent large policy updates
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.args.clip_range, 1 + self.args.clip_range) * advantages
+                # PPO-style clipped surrogate objective
+                # surr1: unclipped objective
+                # surr2: clipped objective to prevent large policy updates
+                surr1 = ratio * advantages
+                surr2 = torch.clamp(ratio, 1 - self.args.clip_range, 1 + self.args.clip_range) * advantages
 
-            # Take minimum of clipped and unclipped objective (pessimistic bound)
-            policy_loss = -torch.min(surr1, surr2).mean()
+                # Take minimum of clipped and unclipped objective (pessimistic bound)
+                policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Add KL penalty to encourage staying close to reference policy
-            kl_penalty = self.beta * kl_div.mean()
+                # Add KL penalty to encourage staying close to reference policy
+                kl_penalty = self.beta * kl_div.mean()
 
-            # Total loss combines policy gradient and KL regularization
-            loss = policy_loss + kl_penalty
+                # Total loss combines policy gradient and KL regularization
+                loss = policy_loss + kl_penalty
 
-            # Store metrics for logging (detach to avoid memory issues)
-            loss_value = loss.detach().item()
-            policy_loss_value = policy_loss.detach().item()
-            kl_div_value = kl_div.mean().detach().item()
-            epoch_losses.append(loss_value)
-            epoch_policy_losses.append(policy_loss_value)
-            epoch_kl_divs.append(kl_div_value)
+                # Store metrics for logging (detach to avoid memory issues)
+                loss_value = loss.detach().item()
+                policy_loss_value = policy_loss.detach().item()
+                kl_div_value = kl_div.mean().detach().item()
+                epoch_losses.append(loss_value)
+                epoch_policy_losses.append(policy_loss_value)
+                epoch_kl_divs.append(kl_div_value)
 
-            # Backward pass and optimization step
-            self.accelerator.backward(loss)
-            self.accelerator.clip_grad_norm_(self.model.parameters(), clip_grad_norm)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+                # Backward pass - gradients accumulate automatically
+                self.accelerator.backward(loss)
+
+            # Only step optimizer when gradients are synced
+            # (i.e., after gradient_accumulation_steps iterations)
+            if self.accelerator.sync_gradients:
+                self.accelerator.clip_grad_norm_(
+                    [p for p in self.model.parameters() if p.requires_grad],
+                    clip_grad_norm
+                )
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             # Free memory after each task to prevent GPU memory accumulation
             del current_log_probs, ref_log_probs, kl_div, ratio
@@ -379,6 +453,15 @@ class SGRPOTrainer:
             global_step += 1
             step_time = time.time() - step_start_time
 
+            # Update tqdm progress bar with current metrics
+            mean_reward = sum(step_rewards) / len(step_rewards) if step_rewards else 0
+            pbar.set_postfix({
+                "step": global_step,
+                "loss": f"{loss_value:.4f}",
+                "kl": f"{kl_div_value:.4f}",
+                "reward": f"{mean_reward:.2f}"
+            })
+
             # Log metrics at logging_steps interval
             if global_step % self.args.logging_steps == 0 and self.accelerator.is_main_process:
                 gpu_stats = get_gpu_memory_stats()
@@ -386,7 +469,7 @@ class SGRPOTrainer:
                     "train/loss": loss_value,
                     "train/policy_loss": policy_loss_value,
                     "train/kl_divergence": kl_div_value,
-                    "train/mean_reward": sum(step_rewards) / len(step_rewards),
+                    "train/mean_reward": mean_reward,
                     "train/step_time_seconds": step_time,
                     "train/epoch": epoch,
                     "train/global_step": global_step,
@@ -395,8 +478,8 @@ class SGRPOTrainer:
                     log_dict.update(gpu_stats)
                 wandb.log(log_dict, step=global_step)
 
-                print(f"Step {global_step}: loss={loss_value:.4f}, "
-                      f"policy_loss={policy_loss_value:.4f}, kl={kl_div_value:.4f}")
+        # Close progress bar
+        pbar.close()
 
         # Log epoch summary
         if self.accelerator.is_main_process and epoch_losses:
@@ -408,7 +491,7 @@ class SGRPOTrainer:
                 "epoch/number": epoch,
             }
             wandb.log(epoch_summary, step=global_step)
-            print(f"Epoch {epoch} complete: mean_loss={epoch_summary['epoch/mean_loss']:.4f}")
+            print(f"\nEpoch {epoch} complete: mean_loss={epoch_summary['epoch/mean_loss']:.4f}")
 
         return global_step
 
@@ -525,7 +608,7 @@ class SGRPOTrainingArguments:
     """
 
     # Model configuration
-    model_name: str = "demonwizard0/affine-new-3"  # HuggingFace model identifier
+    model_name: str = "demonwizard0/affine-new-3"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
     use_flash_attention: bool = True  # Use Flash Attention 2 for efficiency
     load_in_4bit: bool = False  # Enable 4-bit quantization
     load_in_8bit: bool = False  # Enable 8-bit quantization
@@ -534,8 +617,8 @@ class SGRPOTrainingArguments:
     train_dataset_path: str = "datasets/train_exp"  # Path to training JSONL files
 
     # LoRA configuration for parameter-efficient fine-tuning
-    lora_r: int = 16  # LoRA rank (lower = fewer params, higher = more expressive)
-    lora_alpha: int = 32  # LoRA scaling factor (typically 2x rank)
+    lora_r: int = 8  # LoRA rank (lower = fewer params, higher = more expressive)
+    lora_alpha: int = 16  # LoRA scaling factor (typically 2x rank)
     lora_dropout: float = 0.05  # Dropout for LoRA layers
     lora_target_modules: List[str] = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",  # Attention projections
@@ -546,16 +629,17 @@ class SGRPOTrainingArguments:
     output_dir: str = "./models/qwen3-sgrpo-output"  # Directory for checkpoints and logs
     num_train_epochs: int = 3  # Total training epochs
     per_device_train_batch_size: int = 1  # Batch size per GPU
-    gradient_accumulation_steps: int = 16  # Steps before gradient update
+    gradient_accumulation_steps: int = 2  # Steps before gradient update
     learning_rate: float = 5e-6  # Peak learning rate
     warmup_ratio: float = 0.1  # Fraction of steps for LR warmup
     clip_grad_norm: float = 1.0  # Maximum gradient norm for clipping
     clip_range: float = 0.2  # FIX: Added missing PPO clip range parameter
 
     # GRPO specific parameters
-    num_generations: int = 4  # Number of trajectories to sample per task
+    num_generations: int = 2  # Number of trajectories to sample per task
     max_prompt_length: int = 512  # Maximum prompt token length
     max_completion_length: int = 2048  # Maximum completion token length
+    max_input_length: int = 2048  # Maximum total input length (clip if exceeded)
     temperature: float = 0.7  # Sampling temperature for generation
     top_p: float = 0.9  # Nucleus sampling probability threshold
 
