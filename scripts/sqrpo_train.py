@@ -161,10 +161,10 @@ class SGRPOTrainer:
                         "clip_grad_norm": self.args.clip_grad_norm,
                         "num_generations": self.args.num_generations,
                         "beta_kl": self.beta,
-                        "temperature": self.args.temperature,
-                        "top_p": self.args.top_p,
-                        "max_prompt_length": self.args.max_prompt_length,
-                        "max_completion_length": self.args.max_completion_length,
+                        # "temperature": self.args.temperature,
+                        # "top_p": self.args.top_p,
+                        # "max_prompt_length": self.args.max_prompt_length,
+                        # "max_completion_length": self.args.max_completion_length,
                     },
                     tags=["sgrpo", "rlhf", "lora"],
                 )
@@ -203,8 +203,14 @@ class SGRPOTrainer:
             Tensor of normalized advantages for each trajectory
         """
         rewards = torch.tensor([traj["reward"] for traj in trajectories])
+        # Need at least 2 samples for meaningful normalization
+        if len(rewards) < 2:
+            return torch.zeros_like(rewards)
         mean = torch.mean(rewards)
-        std = torch.std(rewards) + 1e-8  # Add epsilon for numerical stability
+        std = torch.std(rewards)
+        if std == 0:
+            return torch.zeros_like(rewards)
+        std = std + 1e-8  # Add epsilon for numerical stability
         advantages = (rewards - mean) / std
         return advantages
 
@@ -611,13 +617,13 @@ class SGRPOTrainingArguments:
     """
 
     # Model configuration
-    model_name: str = "demonwizard0/affine-new-3"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
+    model_name: str = "Affineme/Affine-5GWqrs7hgWRjj3yMF9uM4fnzowsbYCGugofQ7Bu1AAJ3L9Qz"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
     use_flash_attention: bool = True  # Use Flash Attention 2 for efficiency
     load_in_4bit: bool = False  # Enable 4-bit quantization
     load_in_8bit: bool = False  # Enable 8-bit quantization
 
     # Dataset
-    train_dataset_path: str = "datasets/train_exp"  # Path to training JSONL files
+    train_dataset_path: str = "datasets/train"  # Path to training JSONL files
 
     # LoRA configuration for parameter-efficient fine-tuning
     lora_r: int = 8  # LoRA rank (lower = fewer params, higher = more expressive)
@@ -632,19 +638,19 @@ class SGRPOTrainingArguments:
     output_dir: str = "./models/qwen3-sgrpo-output"  # Directory for checkpoints and logs
     num_train_epochs: int = 3  # Total training epochs
     per_device_train_batch_size: int = 1  # Batch size per GPU
-    gradient_accumulation_steps: int = 2  # Steps before gradient update
+    gradient_accumulation_steps: int = 16  # Steps before gradient update
     learning_rate: float = 5e-6  # Peak learning rate
     warmup_ratio: float = 0.1  # Fraction of steps for LR warmup
     clip_grad_norm: float = 1.0  # Maximum gradient norm for clipping
     clip_range: float = 0.2  # FIX: Added missing PPO clip range parameter
 
     # GRPO specific parameters
-    num_generations: int = 2  # Number of trajectories to sample per task
-    max_prompt_length: int = 512  # Maximum prompt token length
-    max_completion_length: int = 2048  # Maximum completion token length
+    num_generations: int = 4  # Number of trajectories to sample per task
+    # max_prompt_length: int = 512  # Maximum prompt token length
+    # max_completion_length: int = 2048  # Maximum completion token length
     max_input_length: int = 2048  # Maximum total input length (clip if exceeded)
-    temperature: float = 0.7  # Sampling temperature for generation
-    top_p: float = 0.9  # Nucleus sampling probability threshold
+    # temperature: float = 0.7  # Sampling temperature for generation
+    # top_p: float = 0.9  # Nucleus sampling probability threshold
 
     # S-GRPO specific (multi-round conversation penalties)
     max_rounds: int = 10  # Maximum conversation rounds before penalty
@@ -654,11 +660,11 @@ class SGRPOTrainingArguments:
     # Optimization settings
     bf16: bool = True  # Use bfloat16 mixed precision
     gradient_checkpointing: bool = True  # Trade compute for memory
-    optim: str = "adamw_8bit"  # Optimizer type
+    # optim: str = "adamw_8bit"  # Optimizer type
 
     # Logging and checkpointing
     logging_steps: int = 10  # Log metrics every N steps
-    save_steps: int = 10  # Save checkpoint every N steps
+    save_steps: int = 200  # Save checkpoint every N steps
     eval_steps: int = 100  # Run evaluation every N steps
     report_to: str = "wandb"  # Logging backend (wandb, tensorboard, none)
     run_name: str = "qwen3-sgrpo"  # Name for the training run
@@ -668,8 +674,8 @@ class SGRPOTrainingArguments:
     wandb_project: str = "sgrpo-training"  # Wandb project name
 
     # vLLM configuration (for inference acceleration)
-    use_vllm: bool = True  # Use vLLM for faster inference
-    vllm_gpu_memory_utilization: float = 0.7  # GPU memory fraction for vLLM
+    # use_vllm: bool = True  # Use vLLM for faster inference
+    # vllm_gpu_memory_utilization: float = 0.7  # GPU memory fraction for vLLM
 
     # Reproducibility
     seed: int = 42  # Random seed for reproducibility
