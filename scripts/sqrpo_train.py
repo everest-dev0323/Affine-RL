@@ -410,10 +410,10 @@ class SGRPOTrainer:
                 ref_log_probs = torch.stack(ref_log_probs).detach()  # Ensure ref is detached
 
                 # Compute KL divergence (approximated as log ratio)
-                kl_div = current_log_probs - ref_log_probs
+                log_ratio = current_log_probs - ref_log_probs
 
                 # Compute probability ratio for importance sampling
-                ratio = torch.exp(kl_div)
+                ratio = torch.exp(log_ratio)
 
                 # PPO-style clipped surrogate objective
                 # surr1: unclipped objective
@@ -424,11 +424,14 @@ class SGRPOTrainer:
                 # Take minimum of clipped and unclipped objective (pessimistic bound)
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Add KL penalty to encourage staying close to reference policy
-                kl_penalty = self.beta * kl_div.mean()
+                # Compute ACTUAL KL divergence (approximate)
+                # KL(ref || current) approximation
+                approx_kl = ((ratio - 1) - log_ratio).mean()
+                # OR use reverse KL: KL(current || ref)
+                # approx_kl = (log_ratio * ratio).mean()
 
                 # Total loss combines policy gradient and KL regularization
-                loss = policy_loss + kl_penalty
+                loss = policy_loss + approx_kl
 
                 # Store metrics for logging (detach to avoid memory issues)
                 loss_value = loss.detach().item()
