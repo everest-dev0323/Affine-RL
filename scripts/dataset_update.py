@@ -321,23 +321,54 @@ def calculate_final_reward(
 # Task ID Functions (from dataset_prepare.py)
 # ============================================================================
 
-def extract_task_number(task_id: Any) -> str:
-    """Extract a numeric identifier from task_id."""
+# Task ID constraints
+MIN_TASK_ID = 0
+MAX_TASK_ID = 3000
+MAX_ITEMS_PER_TASK = 500
+
+
+def extract_task_number(task_id: Any) -> Optional[int]:
+    """Extract a numeric identifier from task_id. Returns None if invalid."""
     if task_id is None:
-        return "unknown"
+        return None
     if isinstance(task_id, (int, float)):
-        return str(int(task_id))
+        return int(task_id)
     task_str = str(task_id)
     match = re.match(r'^(\d+)', task_str)
     if match:
-        return match.group(1)
-    return str(abs(hash(task_str)) % 100000)
+        return int(match.group(1))
+    return None
 
 
-def get_output_key(env: str, task_id: Any) -> str:
-    """Generate output file key from env and task_id."""
+def is_valid_task_id(task_id: Any) -> bool:
+    """Check if task_id is a valid number between 0 and 3000."""
+    task_num = extract_task_number(task_id)
+    if task_num is None:
+        return False
+    return MIN_TASK_ID <= task_num <= MAX_TASK_ID
+
+
+def get_output_key(env: str, task_id: Any) -> Optional[str]:
+    """Generate output file key from env and task_id. Returns None if invalid."""
     task_number = extract_task_number(task_id)
+    if task_number is None:
+        return None
     return f"train_{env}_{task_number}"
+
+
+def count_existing_items(train_dir: str) -> Dict[str, int]:
+    """Count existing items per output key from training files."""
+    counts = defaultdict(int)
+    train_path = Path(train_dir)
+    if not train_path.exists():
+        return counts
+
+    for jsonl_file in train_path.glob("train_*.jsonl"):
+        output_key = jsonl_file.stem  # e.g., "train_alfworld_1"
+        with open(jsonl_file, "r", encoding="utf-8") as f:
+            counts[output_key] = sum(1 for _ in f)
+
+    return counts
 
 
 # ============================================================================
@@ -548,7 +579,12 @@ def update_dataset(
     
     # Create train directory if needed
     os.makedirs(train_dir, exist_ok=True)
-    
+
+    # Load existing task counts
+    print("Counting existing items per task...")
+    task_counts = count_existing_items(train_dir)
+    print(f"Found {len(task_counts)} existing task files")
+
     # Process new files
     stats = {
         "new_files": 0,
@@ -558,6 +594,8 @@ def update_dataset(
         "total_failed": 0,
         "total_skipped_reasoning": 0,
         "total_skipped_clear": 0,
+        "total_skipped_invalid_task": 0,
+        "total_skipped_task_full": 0,
         "env_counts": defaultdict(int),
     }
 
@@ -578,18 +616,42 @@ def update_dataset(
         if processed_items:
             # Group by output key and write immediately
             file_output: Dict[str, List[Dict]] = defaultdict(list)
+            skipped_invalid = 0
+            skipped_full = 0
+
             for item in processed_items:
                 env = item.get("env")
                 task_id = item.get("task_id")
+
+                # Check if task_id is valid (0-3000)
+                if not is_valid_task_id(task_id):
+                    skipped_invalid += 1
+                    continue
+
                 output_key = get_output_key(env, task_id)
+                if output_key is None:
+                    skipped_invalid += 1
+                    continue
+
+                # Check if task has reached max items
+                if task_counts[output_key] >= MAX_ITEMS_PER_TASK:
+                    skipped_full += 1
+                    continue
+
                 file_output[output_key].append(item)
+                task_counts[output_key] += 1
                 stats["env_counts"][env] += 1
 
+            stats["total_skipped_invalid_task"] += skipped_invalid
+            stats["total_skipped_task_full"] += skipped_full
+
             # Write this file's items immediately to disk
+            items_written = 0
             for output_key, items in file_output.items():
                 append_to_train_file(train_dir, output_key, items)
+                items_written += len(items)
 
-            stats["new_items"] += len(processed_items)
+            stats["new_items"] += items_written
 
         # Detailed per-file log
         print(f"  -> total: {file_result['total']}, success: {file_result['success']}, "
@@ -623,6 +685,9 @@ def update_dataset(
     print(f"Total failed: {stats['total_failed']}")
     print(f"Total skipped (reasoning): {stats['total_skipped_reasoning']}")
     print(f"Total skipped (clear): {stats['total_skipped_clear']}")
+    print(f"Total skipped (invalid task_id): {stats['total_skipped_invalid_task']}")
+    print(f"Total skipped (task full >{MAX_ITEMS_PER_TASK}): {stats['total_skipped_task_full']}")
+    print(f"Items written: {stats['new_items']}")
     print(f"Last processed file: {last_successful_file}")
     print("\nItems per environment:")
     for env, count in sorted(stats["env_counts"].items()):
