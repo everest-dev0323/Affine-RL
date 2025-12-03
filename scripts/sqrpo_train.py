@@ -414,17 +414,17 @@ class SGRPOTrainer:
             seq_len = input_ids.shape[0]
             pad_len = max_len - seq_len
 
-            # Pad input_ids (left padding for causal LM is often better, but right padding works too)
-            padded_ids = F.pad(input_ids, (0, pad_len), value=pad_token_id)
+            # Left-pad input_ids (better for causal LM as it keeps the end aligned)
+            padded_ids = F.pad(input_ids, (pad_len, 0), value=pad_token_id)
             padded_input_ids.append(padded_ids)
 
-            # Pad completion_mask with 0s (don't compute loss on padding)
-            padded_mask = F.pad(completion_mask, (0, pad_len), value=0.0)
+            # Left-pad completion_mask with 0s (don't compute loss on padding)
+            padded_mask = F.pad(completion_mask, (pad_len, 0), value=0.0)
             padded_completion_masks.append(padded_mask)
 
-            # Create attention mask (1 for real tokens, 0 for padding)
+            # Create attention mask (1 for real tokens, 0 for padding) with left padding
             attn_mask = torch.ones(seq_len, device=device)
-            attn_mask = F.pad(attn_mask, (0, pad_len), value=0.0)
+            attn_mask = F.pad(attn_mask, (pad_len, 0), value=0.0)
             padded_attention_masks.append(attn_mask)
 
         # Stack into batched tensors
