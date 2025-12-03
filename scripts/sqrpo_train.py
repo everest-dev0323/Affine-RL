@@ -107,6 +107,7 @@ class SGRPOTrainer:
         self.tokenizer = tokenizer
         self.beta = 0.01  # KL divergence penalty weight
         self.train_dataset = None
+        self.train_dataloader = None
         self.eval_dataset = None
         self.best_eval_loss = float('inf')  # Track best evaluation loss for checkpointing
 
@@ -123,6 +124,10 @@ class SGRPOTrainer:
             (p for p in self.model.parameters() if p.requires_grad),
             lr=self.args.learning_rate
         )
+        
+        # Load the training dataset before starting
+        self.get_raw_dataset()
+        self.create_dataloader()
 
         # Prepare model and optimizer for distributed training
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
@@ -160,11 +165,7 @@ class SGRPOTrainer:
                         "clip_range": self.args.clip_range,
                         "clip_grad_norm": self.args.clip_grad_norm,
                         "num_generations": self.args.num_generations,
-                        "beta_kl": self.beta,
-                        # "temperature": self.args.temperature,
-                        # "top_p": self.args.top_p,
-                        # "max_prompt_length": self.args.max_prompt_length,
-                        # "max_completion_length": self.args.max_completion_length,
+                        "beta_kl": self.beta
                     },
                     tags=["sgrpo", "rlhf", "lora"],
                 )
@@ -188,6 +189,100 @@ class SGRPOTrainer:
                     "task_id": fname
                 })
         self.train_dataset = Dataset.from_list(train_list)
+
+    def create_dataloader(self):
+        """
+        Create a DataLoader that prepares contrastive pairs for GRPO training.
+
+        For each task_id:
+        1. Find the max original_reward value
+        2. Store all max_reward_records and less_reward_records
+        3. Sampling happens dynamically in collate_fn for fresh samples each epoch
+
+        This creates contrastive pairs for GRPO training.
+        """
+        processed_data = []
+
+        for task in self.train_dataset:
+            history = task["history"]
+            task_id = task["task_id"]
+
+            if not history:
+                continue
+
+            # Find max original_reward for this task
+            max_reward = max(record.get("base_reward", 0) for record in history)
+
+            # Separate records into max reward and less than max reward
+            max_reward_records = [
+                record for record in history
+                if record.get("base_reward", 0) == max_reward
+            ]
+            less_reward_records = [
+                record for record in history
+                if record.get("base_reward", 0) < max_reward
+            ]
+
+            # Only include tasks that have both positive and negative examples
+            if max_reward_records and less_reward_records:
+                processed_data.append({
+                    "task_id": task_id,
+                    "max_reward_records": max_reward_records,  # All records with max reward
+                    "less_reward_records": less_reward_records,  # All records with less than max reward
+                    "max_reward": max_reward
+                })
+
+        # Create Dataset and DataLoader
+        self.processed_dataset = Dataset.from_list(processed_data)
+
+        # Use torch DataLoader for batching
+        self.train_dataloader = torch.utils.data.DataLoader(
+            self.processed_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            shuffle=True,
+            collate_fn=self._collate_fn
+        )
+
+        if self.accelerator.is_main_process:
+            print(f"Created DataLoader with {len(processed_data)} task groups")
+
+    def _collate_fn(self, batch):
+        """
+        Custom collate function that samples fresh data each time.
+
+        For each task in the batch:
+        - Randomly samples num_generations from max_reward_records (positive)
+        - Randomly samples num_generations from less_reward_records (negative)
+
+        This ensures different samples are used each epoch.
+        """
+        num_gen = self.args.num_generations
+        result = []
+
+        for item in batch:
+            max_reward_records = item["max_reward_records"]
+            less_reward_records = item["less_reward_records"]
+
+            # Sample positive examples (max reward) - fresh each time
+            if len(max_reward_records) >= num_gen:
+                sampled_positive = random.sample(max_reward_records, num_gen)
+            else:
+                sampled_positive = max_reward_records
+
+            # Sample negative examples (less than max reward) - fresh each time
+            if len(less_reward_records) >= num_gen:
+                sampled_negative = random.sample(less_reward_records, num_gen)
+            else:
+                sampled_negative = less_reward_records
+
+            result.append({
+                "task_id": item["task_id"],
+                "positive_samples": sampled_positive,
+                "negative_samples": sampled_negative,
+                "max_reward": item["max_reward"]
+            })
+
+        return result
 
     def compute_advantages(self, trajectories):
         """
@@ -279,12 +374,11 @@ class SGRPOTrainer:
 
     def compute_log_probs(self, model, trajectories, requires_grad=True):
         """
-        Compute log probabilities for assistant responses in trajectories.
+        Compute log probabilities for assistant responses in trajectories (batched).
 
-        This memory-efficient implementation processes each trajectory in a single
-        forward pass using a completion mask, instead of iterating through each
-        assistant turn separately. The completion mask marks assistant response
-        tokens (1) vs other tokens (0), allowing selective log prob computation.
+        This batched implementation processes all trajectories in a single forward
+        pass by padding sequences to the same length. The completion mask marks
+        assistant response tokens (1) vs other tokens (0).
 
         Args:
             model: The language model to compute log probs with
@@ -294,51 +388,89 @@ class SGRPOTrainer:
         Returns:
             List of total log probability for each trajectory
         """
-        all_log_probs = []
         device = next(model.parameters()).device
+
+        # Build input_ids and completion_masks for all trajectories
+        all_input_ids = []
+        all_completion_masks = []
 
         for traj in trajectories:
             conversations = traj["conversations"]
-
-            # Build input_ids and completion mask for the entire conversation
             input_ids, completion_mask = self._build_completion_mask(conversations, device)
-            attention_mask = torch.ones_like(input_ids)
+            all_input_ids.append(input_ids.squeeze(0))  # Remove batch dim for now
+            all_completion_masks.append(completion_mask.squeeze(0))
 
-            # Single forward pass for entire conversation
-            with torch.set_grad_enabled(requires_grad):
-                outputs = model(input_ids, attention_mask=attention_mask, return_dict=True)
-                logits = outputs.logits
+        # Pad sequences to the same length
+        max_len = max(ids.shape[0] for ids in all_input_ids)
 
-                # Shift for next-token prediction: logits[:-1] predict labels[1:]
-                shift_logits = logits[:, :-1].contiguous()
-                shift_labels = input_ids[:, 1:].contiguous()
-                shift_completion_mask = completion_mask[:, 1:].contiguous()
+        padded_input_ids = []
+        padded_completion_masks = []
+        padded_attention_masks = []
 
-                # Compute log softmax and gather log probs for actual tokens
-                token_log_probs = F.log_softmax(shift_logits, dim=-1)
-                selected_log_probs = token_log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+        pad_token_id = self.tokenizer.pad_token_id or 0
 
-                # Sum log probs only for assistant response tokens (masked by completion_mask)
-                log_prob = torch.sum(selected_log_probs * shift_completion_mask)
+        for input_ids, completion_mask in zip(all_input_ids, all_completion_masks):
+            seq_len = input_ids.shape[0]
+            pad_len = max_len - seq_len
 
-            all_log_probs.append(log_prob)
+            # Pad input_ids (left padding for causal LM is often better, but right padding works too)
+            padded_ids = F.pad(input_ids, (0, pad_len), value=pad_token_id)
+            padded_input_ids.append(padded_ids)
 
-            # Free intermediate tensors to reduce GPU memory
-            del outputs, logits, shift_logits, token_log_probs, selected_log_probs
-            del input_ids, attention_mask, shift_labels, shift_completion_mask, completion_mask
+            # Pad completion_mask with 0s (don't compute loss on padding)
+            padded_mask = F.pad(completion_mask, (0, pad_len), value=0.0)
+            padded_completion_masks.append(padded_mask)
 
-        return all_log_probs
+            # Create attention mask (1 for real tokens, 0 for padding)
+            attn_mask = torch.ones(seq_len, device=device)
+            attn_mask = F.pad(attn_mask, (0, pad_len), value=0.0)
+            padded_attention_masks.append(attn_mask)
+
+        # Stack into batched tensors
+        batch_input_ids = torch.stack(padded_input_ids)  # (batch_size, max_len)
+        batch_completion_masks = torch.stack(padded_completion_masks)  # (batch_size, max_len)
+        batch_attention_masks = torch.stack(padded_attention_masks)  # (batch_size, max_len)
+
+        # Single batched forward pass
+        with torch.set_grad_enabled(requires_grad):
+            outputs = model(
+                batch_input_ids,
+                attention_mask=batch_attention_masks,
+                return_dict=True
+            )
+            logits = outputs.logits
+
+            # Shift for next-token prediction: logits[:-1] predict labels[1:]
+            shift_logits = logits[:, :-1].contiguous()  # (batch, max_len-1, vocab)
+            shift_labels = batch_input_ids[:, 1:].contiguous()  # (batch, max_len-1)
+            shift_completion_masks = batch_completion_masks[:, 1:].contiguous()  # (batch, max_len-1)
+
+            # Compute log softmax and gather log probs for actual tokens
+            token_log_probs = F.log_softmax(shift_logits, dim=-1)  # (batch, max_len-1, vocab)
+            selected_log_probs = token_log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)  # (batch, max_len-1)
+
+            # Apply completion mask and sum per trajectory
+            masked_log_probs = selected_log_probs * shift_completion_masks  # (batch, max_len-1)
+            log_probs_per_traj = masked_log_probs.sum(dim=1)  # (batch,)
+
+        # Free intermediate tensors
+        del outputs, logits, shift_logits, token_log_probs, selected_log_probs
+        del batch_input_ids, batch_attention_masks, batch_completion_masks
+        del shift_labels, shift_completion_masks, masked_log_probs, log_probs_per_traj
+
+        return log_probs_per_traj
     
     def train_one_epoch(self, epoch, global_step):
         """
-        Train the model for one epoch over all tasks.
+        Train the model for one epoch using the DataLoader.
 
-        For each task:
-        1. Sample trajectories from the task history
-        2. Compute advantages using GRPO normalization
-        3. Compute policy loss with PPO-style clipping
-        4. Add KL divergence penalty to prevent policy drift
-        5. Update model parameters
+        For each batch from the DataLoader:
+        1. Get positive samples (max reward) and negative samples (less than max reward)
+        2. Combine them into trajectories for GRPO training
+        3. Compute advantages using GRPO normalization
+        4. Compute policy loss with PPO-style clipping
+        5. Add KL divergence penalty to prevent policy drift
+        6. Update model parameters
 
         Args:
             epoch: Current epoch number for logging
@@ -355,97 +487,86 @@ class SGRPOTrainer:
         epoch_kl_divs = []
         epoch_rewards = []
 
-        # Create tqdm progress bar for step-based logging
-        dataset_shuffled = self.train_dataset.shuffle()
-        total_steps = len(dataset_shuffled)
+        # Create tqdm progress bar for DataLoader
+        total_steps = len(self.train_dataloader)
         pbar = tqdm(
-            dataset_shuffled,
-            desc=f"Epoch {epoch}",
+            self.train_dataloader,
+            desc=f"Train Loop | Epoch {epoch}",
             total=total_steps,
             disable=not self.accelerator.is_main_process,
             dynamic_ncols=True
         )
 
-        for task in pbar:
+        for batch in pbar:
             step_start_time = time.time()
 
             # Use accelerator.accumulate() for proper gradient accumulation
-            # This context manager handles:
-            # - Skipping optimizer.step() and zero_grad() on accumulation steps
-            # - Executing them only after gradient_accumulation_steps iterations
-            # - Proper loss scaling
             with self.accelerator.accumulate(self.model):
                 if self.accelerator.sync_gradients:
                     allocated = torch.cuda.memory_allocated(self.accelerator.device) / (1024**3)
                     reserved = torch.cuda.memory_reserved(self.accelerator.device) / (1024**3)
                     max_alloc = torch.cuda.max_memory_allocated(self.accelerator.device) / (1024**3)
                     self.accelerator.print(f"[MEM] allocated={allocated:.2f}GB reserved={reserved:.2f}GB max_alloc={max_alloc:.2f}GB")
-                # FIX: sorted() returns a new list; list.sort() returns None
-                history = sorted(task["history"], key=lambda x: x["reward"])
 
-                # Sample trajectories for this training step
-                # Ensure we don't sample more than available
-                num_samples = min(self.args.num_generations, len(history))
-                trajectories = random.sample(history, num_samples)
+                # Process each task in the batch
+                for task_data in batch:
+                    # Combine positive and negative samples into trajectories
+                    # Positive samples have max reward, negative samples have less
+                    trajectories = task_data["positive_samples"] + task_data["negative_samples"]
 
-                # Track rewards for logging
-                step_rewards = [traj["reward"] for traj in trajectories]
-                epoch_rewards.extend(step_rewards)
+                    # Track rewards for logging
+                    step_rewards = [traj["reward"] for traj in trajectories]
+                    epoch_rewards.extend(step_rewards)
 
-                # Compute normalized advantages across sampled trajectories
-                # Move to device and detach since advantages are not part of the computation graph
-                device = next(self.model.parameters()).device
-                advantages = self.compute_advantages(trajectories).to(device).detach()
+                    # Compute normalized advantages across sampled trajectories
+                    device = next(self.model.parameters()).device
+                    advantages = self.compute_advantages(trajectories).to(device).detach()
 
-                # Compute log probabilities under current policy
-                current_log_probs = self.compute_log_probs(self.model, trajectories, requires_grad=True)
+                    # Compute log probabilities under current policy
+                    current_log_probs = self.compute_log_probs(self.model, trajectories, requires_grad=True)
 
-                # Compute log probabilities under reference policy (frozen base model)
-                # This is used for KL divergence computation
-                with torch.no_grad():
-                    ref_log_probs = self.compute_log_probs(self.model.base_model, trajectories, requires_grad=False)
+                    # Compute log probabilities under reference policy (frozen base model)
+                    with torch.no_grad():
+                        ref_log_probs = self.compute_log_probs(self.model.base_model, trajectories, requires_grad=False)
 
-                # Stack log probs into tensors for vectorized computation
-                current_log_probs = torch.stack(current_log_probs)
-                ref_log_probs = torch.stack(ref_log_probs).detach()  # Ensure ref is detached
+                    # Detach log probs for vectorized computation
+                    ref_log_probs = ref_log_probs.detach()
 
-                # Compute KL divergence (approximated as log ratio)
-                log_ratio = current_log_probs - ref_log_probs
+                    # Compute KL divergence (approximated as log ratio)
+                    log_ratio = current_log_probs - ref_log_probs
 
-                # Compute probability ratio for importance sampling
-                ratio = torch.exp(log_ratio)
+                    # Compute probability ratio for importance sampling
+                    ratio = torch.exp(log_ratio)
 
-                # PPO-style clipped surrogate objective
-                # surr1: unclipped objective
-                # surr2: clipped objective to prevent large policy updates
-                surr1 = ratio * advantages
-                surr2 = torch.clamp(ratio, 1 - self.args.clip_range, 1 + self.args.clip_range) * advantages
+                    # PPO-style clipped surrogate objective
+                    surr1 = ratio * advantages
+                    surr2 = torch.clamp(ratio, 1 - self.args.clip_range, 1 + self.args.clip_range) * advantages
 
-                # Take minimum of clipped and unclipped objective (pessimistic bound)
-                policy_loss = -torch.min(surr1, surr2).mean()
+                    # Take minimum of clipped and unclipped objective (pessimistic bound)
+                    policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Compute ACTUAL KL divergence (approximate)
-                # KL(ref || current) approximation
-                approx_kl = ((ratio - 1) - log_ratio).mean()
-                # OR use reverse KL: KL(current || ref)
-                # approx_kl = (log_ratio * ratio).mean()
+                    # Compute ACTUAL KL divergence (approximate)
+                    approx_kl = ((ratio - 1) - log_ratio).mean()
 
-                # Total loss combines policy gradient and KL regularization
-                loss = policy_loss + approx_kl
+                    # Total loss combines policy gradient and KL regularization
+                    loss = policy_loss + approx_kl
 
-                # Store metrics for logging (detach to avoid memory issues)
-                loss_value = loss.detach().item()
-                policy_loss_value = policy_loss.detach().item()
-                kl_div_value = kl_div.mean().detach().item()
-                epoch_losses.append(loss_value)
-                epoch_policy_losses.append(policy_loss_value)
-                epoch_kl_divs.append(kl_div_value)
+                    # Store metrics for logging (detach to avoid memory issues)
+                    loss_value = loss.detach().item()
+                    policy_loss_value = policy_loss.detach().item()
+                    kl_div_value = approx_kl.detach().item()
+                    epoch_losses.append(loss_value)
+                    epoch_policy_losses.append(policy_loss_value)
+                    epoch_kl_divs.append(kl_div_value)
 
-                # Backward pass - gradients accumulate automatically
-                self.accelerator.backward(loss)
+                    # Backward pass - gradients accumulate automatically
+                    self.accelerator.backward(loss)
+
+                    # Free memory after each task
+                    del current_log_probs, ref_log_probs, log_ratio, ratio
+                    del surr1, surr2, policy_loss, approx_kl, loss, advantages
 
             # Only step optimizer when gradients are synced
-            # (i.e., after gradient_accumulation_steps iterations)
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(
                     [p for p in self.model.parameters() if p.requires_grad],
@@ -454,9 +575,6 @@ class SGRPOTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            # Free memory after each task to prevent GPU memory accumulation
-            del current_log_probs, ref_log_probs, kl_div, ratio
-            del surr1, surr2, policy_loss, kl_penalty, loss, advantages
             torch.cuda.empty_cache()
 
             global_step += 1
@@ -486,7 +604,7 @@ class SGRPOTrainer:
                 if gpu_stats:
                     log_dict.update(gpu_stats)
                 wandb.log(log_dict, step=global_step)
-            
+
             if global_step % self.args.save_steps == 0 and self.accelerator.is_main_process:
                 self.save_checkpoint(global_step, checkpoint_name=f"checkpoint-{global_step}")
 
@@ -558,9 +676,6 @@ class SGRPOTrainer:
         # Create output directory for model saves
         os.makedirs(self.args.output_dir, exist_ok=True)
 
-        # Load the training dataset before starting
-        self.get_raw_dataset()
-
         # Log dataset info
         if self.accelerator.is_main_process:
             print(f"Training dataset loaded: {len(self.train_dataset)} tasks")
@@ -620,7 +735,7 @@ class SGRPOTrainingArguments:
     """
 
     # Model configuration
-    model_name: str = "Affineme/Affine-5GWqrs7hgWRjj3yMF9uM4fnzowsbYCGugofQ7Bu1AAJ3L9Qz"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
+    model_name: str = "demonwizard0/affine-new-3"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
     use_flash_attention: bool = True  # Use Flash Attention 2 for efficiency
     load_in_4bit: bool = False  # Enable 4-bit quantization
     load_in_8bit: bool = False  # Enable 8-bit quantization
@@ -648,7 +763,7 @@ class SGRPOTrainingArguments:
     clip_range: float = 0.2  # FIX: Added missing PPO clip range parameter
 
     # GRPO specific parameters
-    num_generations: int = 4  # Number of trajectories to sample per task
+    num_generations: int = 2  # Number of trajectories to sample per task
     # max_prompt_length: int = 512  # Maximum prompt token length
     # max_completion_length: int = 2048  # Maximum completion token length
     max_input_length: int = 2048  # Maximum total input length (clip if exceeded)
