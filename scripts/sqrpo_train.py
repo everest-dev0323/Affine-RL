@@ -105,7 +105,7 @@ class SGRPOTrainer:
         self.args = args
         self.model = model
         self.tokenizer = tokenizer
-        self.beta = 0.01  # KL divergence penalty weight
+        self.beta = 0.1  # KL divergence penalty weight
         self.train_dataset = None
         self.train_dataloader = None
         self.eval_dataset = None
@@ -120,8 +120,9 @@ class SGRPOTrainer:
         self.init_wandb()
 
         # Setup optimizer with AdamW
+        params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
-            (p for p in self.model.parameters() if p.requires_grad),
+            params,
             lr=self.args.learning_rate
         )
         
@@ -130,7 +131,7 @@ class SGRPOTrainer:
         self.create_dataloader()
 
         # Prepare model and optimizer for distributed training
-        self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+        self.model, self.optimizer, self.train_dataloader = self.accelerator.prepare(self.model, self.optimizer, self.train_dataloader)
 
         # Log initial GPU memory state
         log_gpu_memory("Initialization complete")
@@ -303,8 +304,8 @@ class SGRPOTrainer:
             return torch.zeros_like(rewards)
         mean = torch.mean(rewards)
         std = torch.std(rewards)
-        if std == 0:
-            return torch.zeros_like(rewards)
+        # if std == 0:
+        #     return torch.zeros_like(rewards)
         std = std + 1e-8  # Add epsilon for numerical stability
         advantages = (rewards - mean) / std
         return advantages
@@ -456,7 +457,7 @@ class SGRPOTrainer:
         # Free intermediate tensors
         del outputs, logits, shift_logits, token_log_probs, selected_log_probs
         del batch_input_ids, batch_attention_masks, batch_completion_masks
-        del shift_labels, shift_completion_masks, masked_log_probs, log_probs_per_traj
+        del shift_labels, shift_completion_masks, masked_log_probs
 
         return log_probs_per_traj
     
@@ -549,7 +550,10 @@ class SGRPOTrainer:
                     approx_kl = ((ratio - 1) - log_ratio).mean()
 
                     # Total loss combines policy gradient and KL regularization
-                    loss = policy_loss + approx_kl
+                    loss = policy_loss + self.beta * approx_kl
+                    
+                    # Divide loss by gradient accumulation steps
+                    loss = loss / self.args.gradient_accumulation_steps
 
                     # Store metrics for logging (detach to avoid memory issues)
                     loss_value = loss.detach().item()
@@ -575,7 +579,7 @@ class SGRPOTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
 
             global_step += 1
             step_time = time.time() - step_start_time
