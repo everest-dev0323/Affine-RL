@@ -212,3 +212,6 @@ __marimo__/
 /datasets/
 models/
 wandb/
+
+.vite/
+node_modules/
