@@ -105,7 +105,7 @@ class SGRPOTrainer:
         self.args = args
         self.model = model
         self.tokenizer = tokenizer
-        self.beta = 0.1  # KL divergence penalty weight
+        self.beta = 0.5  # KL divergence penalty weight
         self.train_dataset = None
         self.train_dataloader = None
         self.eval_dataset = None
@@ -123,7 +123,8 @@ class SGRPOTrainer:
         params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
             params,
-            lr=self.args.learning_rate
+            lr=self.args.learning_rate, 
+            weight_decay=self.args.weight_decay
         )
         
         # Load the training dataset before starting
@@ -552,6 +553,8 @@ class SGRPOTrainer:
                     # Total loss combines policy gradient and KL regularization
                     loss = policy_loss + self.beta * approx_kl
                     
+                    # Skip unstable batches
+                    
                     # Divide loss by gradient accumulation steps
                     loss = loss / self.args.gradient_accumulation_steps
 
@@ -563,12 +566,18 @@ class SGRPOTrainer:
                     epoch_policy_losses.append(policy_loss_value)
                     epoch_kl_divs.append(kl_div_value)
 
-                    # Backward pass - gradients accumulate automatically
-                    self.accelerator.backward(loss)
+                    if approx_kl.item() > 1.0 or torch.isnan(approx_kl) or torch.isinf(approx_kl):
+                        print(f"⚠️  Skipping unstable batch at step {global_step} (KL={approx_kl.item():.4f})")
+                        self.optimizer.zero_grad()
+                    else:
+                        # Backward pass - gradients accumulate automatically
+                        self.accelerator.backward(loss)
 
                     # Free memory after each task
                     del current_log_probs, ref_log_probs, log_ratio, ratio
                     del surr1, surr2, policy_loss, approx_kl, loss, advantages
+                    
+                    torch.cuda.empty_cache()
 
             # Only step optimizer when gradients are synced
             if self.accelerator.sync_gradients:
@@ -579,9 +588,8 @@ class SGRPOTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
 
-            global_step += 1
             step_time = time.time() - step_start_time
 
             # Update tqdm progress bar with current metrics
@@ -612,6 +620,7 @@ class SGRPOTrainer:
             if global_step % self.args.save_steps == 0 and self.accelerator.is_main_process:
                 self.save_checkpoint(global_step, checkpoint_name=f"checkpoint-{global_step}")
 
+            global_step += 1
         # Close progress bar
         pbar.close()
 
@@ -739,7 +748,7 @@ class SGRPOTrainingArguments:
     """
 
     # Model configuration
-    model_name: str = "demonwizard0/affine-new-3"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
+    model_name: str = "Affineme/Affine-5GWqrs7hgWRjj3yMF9uM4fnzowsbYCGugofQ7Bu1AAJ3L9Qz"  # HuggingFace model identifier ~/.cache/huggingface/hub/models--demonwizard0--affine-new-3/snapshots/e03fdcb01bd8343880a54423bc6fe1ccf08704ac/
     use_flash_attention: bool = True  # Use Flash Attention 2 for efficiency
     load_in_4bit: bool = False  # Enable 4-bit quantization
     load_in_8bit: bool = False  # Enable 8-bit quantization
@@ -761,9 +770,10 @@ class SGRPOTrainingArguments:
     num_train_epochs: int = 3  # Total training epochs
     per_device_train_batch_size: int = 1  # Batch size per GPU
     gradient_accumulation_steps: int = 16  # Steps before gradient update
-    learning_rate: float = 5e-6  # Peak learning rate
+    learning_rate: float = 1e-6  # Peak learning rate
+    weight_decay: float = 0.01
     warmup_ratio: float = 0.1  # Fraction of steps for LR warmup
-    clip_grad_norm: float = 1.0  # Maximum gradient norm for clipping
+    clip_grad_norm: float = 0.5  # Maximum gradient norm for clipping
     clip_range: float = 0.2  # FIX: Added missing PPO clip range parameter
 
     # GRPO specific parameters
