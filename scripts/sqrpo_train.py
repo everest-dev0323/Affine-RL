@@ -11,9 +11,18 @@ Key components:
 - PPO-style clipped objective with KL divergence penalty
 
 Usage:
+    # Using config file:
+    python sqrpo_train.py --config config/local.yaml
+    python sqrpo_train.py --config config/cloud.yaml
+
+    # Using config file with CLI overrides:
+    python sqrpo_train.py --config config/local.yaml --num_train_epochs 5
+
+    # Using only CLI arguments:
     python sqrpo_train.py --model_name "demonwizard0/affine-new-3" --output_dir "./output"
 """
 
+import argparse
 from glob import glob
 import json
 import os
@@ -24,12 +33,82 @@ import transformers
 import torch
 import torch.nn.functional as F
 import wandb
+import yaml
 from accelerate import Accelerator
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftModel
+
+
+def load_config_from_yaml(config_path: str) -> dict:
+    """
+    Load configuration from a YAML file.
+
+    Args:
+        config_path: Path to the YAML configuration file
+
+    Returns:
+        Dictionary containing the configuration values
+    """
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config if config else {}
+
+
+def parse_args_with_config():
+    """
+    Parse arguments with support for YAML config files.
+
+    Priority (highest to lowest):
+    1. Command-line arguments
+    2. YAML config file
+    3. Default values in SGRPOTrainingArguments
+
+    Returns:
+        SGRPOTrainingArguments instance with merged configuration
+    """
+    # First, check if --config is provided
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument('--config', type=str, default=None,
+                           help='Path to YAML configuration file')
+    pre_args, remaining_argv = pre_parser.parse_known_args()
+
+    # Load config from YAML if provided
+    yaml_config = {}
+    if pre_args.config:
+        if not os.path.exists(pre_args.config):
+            raise FileNotFoundError(f"Config file not found: {pre_args.config}")
+        yaml_config = load_config_from_yaml(pre_args.config)
+        print(f"Loaded configuration from: {pre_args.config}")
+
+    # Build argument list from YAML config
+    yaml_args = []
+    for key, value in yaml_config.items():
+        if isinstance(value, bool):
+            if value:
+                yaml_args.append(f'--{key}')
+        elif isinstance(value, list):
+            yaml_args.append(f'--{key}')
+            yaml_args.extend([str(v) for v in value])
+        else:
+            yaml_args.append(f'--{key}')
+            yaml_args.append(str(value))
+
+    # Combine: YAML args first, then CLI args (CLI takes precedence)
+    combined_args = yaml_args + remaining_argv
+
+    # Parse with HfArgumentParser
+    parser = transformers.HfArgumentParser(SGRPOTrainingArguments)
+
+    # Parse the combined arguments
+    if combined_args:
+        (args,) = parser.parse_args_into_dataclasses(args=combined_args)
+    else:
+        (args,) = parser.parse_args_into_dataclasses()
+
+    return args
 
 
 def get_gpu_memory_stats():
@@ -462,6 +541,8 @@ class SGRPOTrainer:
 
         return log_probs_per_traj
     
+    # TODO: High entropy mask function. 
+    
     def train_one_epoch(self, epoch, global_step):
         """
         Train the model for one epoch using the DataLoader.
@@ -818,17 +899,24 @@ def main():
     Main entry point for S-GRPO training.
 
     This function:
-    1. Parses command-line arguments into SGRPOTrainingArguments
+    1. Parses command-line arguments (with optional YAML config) into SGRPOTrainingArguments
     2. Loads the base model and tokenizer from HuggingFace
     3. Applies LoRA adapters for parameter-efficient training
     4. Initializes the SGRPOTrainer and starts training
 
     Usage:
+        # Using config file:
+        python sqrpo_train.py --config config/local.yaml
+        python sqrpo_train.py --config config/cloud.yaml
+
+        # With CLI overrides:
+        python sqrpo_train.py --config config/local.yaml --num_train_epochs 5
+
+        # CLI only:
         python sqrpo_train.py --model_name "model/path" --output_dir "./output"
     """
-    # Parse arguments from command line using HuggingFace's argument parser
-    parser = transformers.HfArgumentParser(SGRPOTrainingArguments)
-    (args,) = parser.parse_args_into_dataclasses()
+    # Parse arguments with YAML config support
+    args = parse_args_with_config()
 
     # Load tokenizer with trust_remote_code for custom tokenizers
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
