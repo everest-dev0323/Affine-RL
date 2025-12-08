@@ -1,12 +1,26 @@
 #!/bin/bash
 
-# Docker images and their port mappings
+# Load environment variables from .env file
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
+
+if [ -f "$ENV_FILE" ]; then
+    echo "Loading environment variables from $ENV_FILE"
+    set -a
+    source "$ENV_FILE"
+    set +a
+else
+    echo "ERROR: .env file not found at $ENV_FILE"
+    exit 1
+fi
+
+# Docker images and their port mappings (using ports from .env)
 declare -A IMAGES=(
-    ["bignickeye/agentgym:webshop-v2"]="36001:8000"
-    ["bignickeye/agentgym:alfworld-v2"]="36002:8000"
-    ["bignickeye/agentgym:sciworld-v2"]="36003:8000"
-    ["bignickeye/agentgym:textcraft-v2"]="36004:8000"
-    ["bignickeye/agentgym:babyai-v2"]="36005:8000"
+    ["bignickeye/agentgym:webshop-v2"]="${AGENTGYM_WEBSHOP_PORT}:8000"
+    ["bignickeye/agentgym:alfworld-v2"]="${AGENTGYM_ALFWORLD_PORT}:8000"
+    ["bignickeye/agentgym:sciworld-v2"]="${AGENTGYM_SCIWORLD_PORT}:8000"
+    ["bignickeye/agentgym:textcraft-v2"]="${AGENTGYM_TEXTCRAFT_PORT}:8000"
+    ["bignickeye/agentgym:babyai-v2"]="${AGENTGYM_BABYAI_PORT}:8000"
 )
 
 # Container name prefix
