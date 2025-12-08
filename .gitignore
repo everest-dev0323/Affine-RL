@@ -215,3 +215,5 @@ wandb/
 
 .vite/
 node_modules/
+
+/result

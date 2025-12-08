@@ -5,7 +5,7 @@ async def main():
     # Connect to user-deployed environment service
     env = af_env.load_env(
         mode="url",
-        base_url="http://localhost:8000"
+        base_url="http://localhost:36003"
     )
     
     # Execute methods
