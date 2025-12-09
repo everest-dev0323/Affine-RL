@@ -38,8 +38,19 @@ echo "=== Docker Environment Setup ==="
 get_container_name() {
     local image=$1
     local prefix=$2
-    local env_name=$(echo "$image" | sed 's/.*://')
-    echo "${prefix}-${env_name}"
+    # Extract the image name part (after last / and before :)
+    # e.g., affinefoundation/sci:pi -> sci
+    # e.g., affinefoundation/agentgym:textcraft -> textcraft (uses tag for agentgym)
+    local repo_name=$(echo "$image" | sed 's|.*/||' | sed 's/:.*//') # e.g., sci, mth, agentgym
+    local tag=$(echo "$image" | sed 's/.*://')                       # e.g., pi, textcraft
+
+    # For agentgym images, use the tag as the env name
+    # For other images (sci, mth, lgc, cde), use the repo name
+    if [[ "$repo_name" == "agentgym" || "$repo_name" == "affine-env" ]]; then
+        echo "${prefix}-${tag}"
+    else
+        echo "${prefix}-${repo_name}"
+    fi
 }
 
 # Function to process images

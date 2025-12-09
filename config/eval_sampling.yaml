@@ -1,0 +1,44 @@
+# Evaluation sampling configuration
+# Defines task ID ranges for each environment and sampling parameters
+
+# Number of samples to randomly select from each environment
+samples_per_env: 50
+
+# Random seed for reproducibility
+random_seed: 42
+
+# Task ID ranges for each environment
+# Format: [min_task_id, max_task_id] (inclusive)
+task_ranges:
+  abd-v2:
+    min: 20000
+    max: 23301
+  ded-v2:
+    min: 20000
+    max: 23301
+  sat:
+    min: 0
+    max: 499
+  babyai:
+    min: 0
+    max: 500
+  alfworld:
+    min: 0
+    max: 1000
+  textcraft:
+    min: 0
+    max: 581
+  sciworld:
+    min: 0
+    max: 999
+  webshop:
+    min: 0
+    max: 499
+
+# Output configuration
+output:
+  # Directory for evaluation reports
+  report_dir: "result/eval_reports"
+  # Report filename template (supports {timestamp} and {model} placeholders)
+  report_filename: "eval_report_{model}_{timestamp}.json"
+
