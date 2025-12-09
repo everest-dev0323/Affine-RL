@@ -38,6 +38,11 @@ ENVIRONMENT_PORTS = {
     'abd-v2': int(os.getenv('AFFINE_PORT', 37001)),
     'ded': int(os.getenv('AFFINE_PORT', 37001)),
     'ded-v2': int(os.getenv('AFFINE_PORT', 37001)),
+    # Affine new environments
+    'sci': int(os.getenv('AFFINE_SCI_PORT', 37002)),
+    'mth': int(os.getenv('AFFINE_MTH_PORT', 37003)),
+    'lgc': int(os.getenv('AFFINE_LGC_PORT', 37004)),
+    'cde': int(os.getenv('AFFINE_CDE_PORT', 37005)),
     # AgentGym environments
     'webshop': int(os.getenv('AGENTGYM_WEBSHOP_PORT', 36001)),
     'alfworld': int(os.getenv('AGENTGYM_ALFWORLD_PORT', 36002)),
@@ -48,6 +53,9 @@ ENVIRONMENT_PORTS = {
 
 # Default config path
 DEFAULT_CONFIG_PATH = "config/eval_sampling.yaml"
+
+# Environments that require task_type parameter (only affine v2 envs)
+ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat'}
 
 
 def load_config(config_path: str) -> Dict:
@@ -106,13 +114,17 @@ async def evaluate_environment(
     
     for task_id in task_ids:
         try:
-            result = await env.evaluate(
-                model=model_name,
-                base_url=model_base_url,
-                task_type=get_base_task_name(env_name),
-                api_key='No API key',
-                task_id=task_id,
-            )
+            # Build evaluate kwargs - only include task_type for specific envs
+            eval_kwargs = {
+                "model": model_name,
+                "base_url": model_base_url,
+                "api_key": 'No API key',
+                "task_id": task_id,
+            }
+            if env_name in ENVS_WITH_TASK_TYPE:
+                eval_kwargs["task_type"] = get_base_task_name(env_name)
+
+            result = await env.evaluate(**eval_kwargs)
             results.append({
                 "task_id": task_id,
                 "result": result,

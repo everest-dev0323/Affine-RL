@@ -83,14 +83,18 @@ async def main():
     args = parse_args()
 
     tasks = [
-        # {"env": "sat", "task_id": 10},
+        {"env": "sat", "task_id": 10},
         {"env": "abd-v2", "task_id": 20010},
-        # {"env": "ded-v2", "task_id": 20010},
-        # {"env": "alfworld", "task_id": 10},
-        # {"env": "sciworld", "task_id": 10},
-        # {"env": "textcraft", "task_id": 10},
-        # {"env": "babyai", "task_id": 10},
-        # {"env": "webshop", "task_id": 10}
+        {"env": "ded-v2", "task_id": 20010},
+        {"env": "sci", "task_id": 10},
+        {"env": "mth", "task_id": 10},
+        {"env": "lgc", "task_id": 10},
+        {"env": "cde", "task_id": 10},
+        {"env": "alfworld", "task_id": 10},
+        {"env": "sciworld", "task_id": 10},
+        {"env": "textcraft", "task_id": 10},
+        {"env": "babyai", "task_id": 10},
+        {"env": "webshop", "task_id": 10}
     ]
     
     model_name = os.getenv('MODEL_NAME')

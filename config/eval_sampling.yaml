@@ -10,6 +10,7 @@ random_seed: 42
 # Task ID ranges for each environment
 # Format: [min_task_id, max_task_id] (inclusive)
 task_ranges:
+  # Affine v2 environments
   abd-v2:
     min: 20000
     max: 23301
@@ -19,6 +20,20 @@ task_ranges:
   sat:
     min: 0
     max: 499
+  # Affine new environments
+  sci:
+    min: 0
+    max: 499
+  mth:
+    min: 0
+    max: 499
+  lgc:
+    min: 0
+    max: 499
+  cde:
+    min: 0
+    max: 499
+  # AgentGym environments
   babyai:
     min: 0
     max: 500
