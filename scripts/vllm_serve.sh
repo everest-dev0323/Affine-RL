@@ -15,7 +15,7 @@ fi
 # Run vLLM server
 echo "Starting vLLM server..."
 echo "Model: $MODEL_NAME"
-echo "Port: $PORT"
+echo "Port: $MODEL_PORT"
 echo "Max Model Length: $MAX_MODEL_LEN"
 
-vllm serve "$MODEL_NAME" --port "$PORT" --max_model_len "$MAX_MODEL_LEN"
+vllm serve "$MODEL_NAME" --port "$MODEL_PORT" --max_model_len "$MAX_MODEL_LEN"

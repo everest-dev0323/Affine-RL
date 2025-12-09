@@ -84,8 +84,8 @@ async def main():
 
     tasks = [
         # {"env": "sat", "task_id": 10},
-        # {"env": "abd-v2", "task_id": 10},
-        {"env": "ded-v2", "task_id": 20010},
+        {"env": "abd-v2", "task_id": 20010},
+        # {"env": "ded-v2", "task_id": 20010},
         # {"env": "alfworld", "task_id": 10},
         # {"env": "sciworld", "task_id": 10},
         # {"env": "textcraft", "task_id": 10},
@@ -117,8 +117,7 @@ async def main():
             base_url=f"{model_base_url}:{model_port}/v1",
             task_type=get_base_task_name(task['env']),
             api_key='No API key',
-            task_id=10,
-            seed=3889470404
+            task_id=task['task_id'],
         )
     
         results.append(result)
