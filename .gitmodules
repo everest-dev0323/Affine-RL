@@ -1,0 +1,3 @@
+[submodule "AffineFoundation/affinetes"]
+	path = AffineFoundation/affinetes
+	url = https://github.com/Bambuuai/affinetes.git
