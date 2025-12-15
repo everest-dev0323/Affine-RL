@@ -38,6 +38,8 @@ ENVIRONMENT_PORTS = {
     'mth': int(os.getenv('AFFINE_MTH_PORT', 37003)),
     'lgc': int(os.getenv('AFFINE_LGC_PORT', 37004)),
     'cde': int(os.getenv('AFFINE_CDE_PORT', 37005)),
+    # SWE-benchmark
+    'swe-pro': int(os.getenv('AFFINE_SWE_PORT', 38001)),
     # AgentGym environments
     'webshop': int(os.getenv('AGENTGYM_WEBSHOP_PORT', 36001)),
     'alfworld': int(os.getenv('AGENTGYM_ALFWORLD_PORT', 36002)),
@@ -45,6 +47,8 @@ ENVIRONMENT_PORTS = {
     'textcraft': int(os.getenv('AGENTGYM_TEXTCRAFT_PORT', 36004)),
     'babyai': int(os.getenv('AGENTGYM_BABYAI_PORT', 36005)),
 }
+
+ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat'}
 
 def parse_args():
     """Parse command line arguments"""
@@ -90,6 +94,7 @@ async def main():
         {"env": "mth", "task_id": 10},
         {"env": "lgc", "task_id": 10},
         {"env": "cde", "task_id": 10},
+        {"env": "swe-pro", "task_id": 10},
         {"env": "alfworld", "task_id": 10},
         {"env": "sciworld", "task_id": 10},
         {"env": "textcraft", "task_id": 10},
@@ -100,11 +105,12 @@ async def main():
     model_name = os.getenv('MODEL_NAME')
     model_base_url = os.getenv('MODEL_BASE_URL')
     model_port = os.getenv('MODEL_PORT')
+    full_model_url = f"{model_base_url}:{model_port}/v1"
     
     print("=" * 60)
     print("Evaluation Configuration:")
     print(f"  Model: {model_name}")
-    print(f"  Model Base URL: {model_base_url}:{model_port}/v1")
+    print(f"  Model Base URL: {full_model_url}")
     print(f"  Number of Tasks: {len(tasks)}")
     print("=" * 60)
 
@@ -115,14 +121,17 @@ async def main():
             mode="url",
             base_url=f"http://localhost:{ENVIRONMENT_PORTS[task['env']]}"
         )
+        # Build evaluate kwargs - only include task_type for specific envs
+        eval_kwargs = {
+            "model": model_name,
+            "base_url": full_model_url,
+            "api_key": 'No API key',
+            "task_id": task['task_id'],
+        }
+        if task['env'] in ENVS_WITH_TASK_TYPE:
+            eval_kwargs["task_type"] = get_base_task_name(task['env'])
         
-        result = await env.evaluate(
-            model=model_name,
-            base_url=f"{model_base_url}:{model_port}/v1",
-            task_type=get_base_task_name(task['env']),
-            api_key='No API key',
-            task_id=task['task_id'],
-        )
+        result = await env.evaluate(**eval_kwargs)
     
         results.append(result)
     

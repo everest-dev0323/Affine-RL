@@ -30,6 +30,7 @@ declare -A AFFINE_IMAGES=(
     ["affinefoundation/mth:pi"]="${AFFINE_MTH_PORT}:8000"
     ["affinefoundation/lgc:pi"]="${AFFINE_LGC_PORT}:8000"
     ["affinefoundation/cde:pi"]="${AFFINE_CDE_PORT}:8000"
+    ["affinefoundation/swebench:pro"]="${AFFINE_SWE_PORT}:8000"
 )
 
 echo "=== Docker Environment Setup ==="
