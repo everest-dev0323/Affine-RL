@@ -36,7 +36,7 @@ class DistributedEvaluator(BaseTrainer):
 
         self.create_accelerator()
         self.set_seed()
-        self.setup_tokenizer()
+        # self.setup_tokenizer()
         self.get_raw_dataset()
         self.get_inference_dataloader()
 
@@ -54,14 +54,14 @@ class DistributedEvaluator(BaseTrainer):
         """
         set_seed(self.args["seed"] + self.accelerator.process_index)
 
-    def setup_tokenizer(self):
-        """
-        Setup the tokenizer.
-        """
-        self.agent.tokenizer.pad_token_id = 0
-        self.agent.tokenizer.eos_token_id = 2
-        self.accelerator.print(f"[Vocab size]: {len(self.agent.tokenizer)}")
-        self.agent.model.resize_token_embeddings(len(self.agent.tokenizer))
+    # def setup_tokenizer(self):
+    #     """
+    #     Setup the tokenizer.
+    #     """
+    #     self.agent.tokenizer.pad_token_id = 0
+    #     self.agent.tokenizer.eos_token_id = 2
+    #     self.accelerator.print(f"[Vocab size]: {len(self.agent.tokenizer)}")
+    #     self.agent.model.resize_token_embeddings(len(self.agent.tokenizer))
 
     def get_raw_dataset(self):
         with self.accelerator.main_process_first():

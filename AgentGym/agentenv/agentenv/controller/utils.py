@@ -279,7 +279,7 @@ class BaseTrainer(BaseAgentEnvController):
         )
         rewards = np.array([exp.reward for exp in exps])
         return EvaluationOutput(
-            experiences=exps, score=rewards.mean(), success=(rewards == 1 or rewards == 100).mean()
+            experiences=exps, score=rewards.mean(), success=((rewards == 1) | (rewards == 100)).mean()
         )
 
     def save_model(self):
