@@ -22,7 +22,7 @@ pip install -e .
 
 ### 4. Install additional libraries
 ```bash
-pip install vllm
+pip install vllm mini-swe-agent
 ```
 
 ### 5. Set up .env file

@@ -12,6 +12,7 @@ import asyncio
 import argparse
 import sys
 import os
+import importlib
 import json
 from typing import Optional
 from dotenv import load_dotenv
@@ -41,6 +42,9 @@ from AffineFoundation.affinetes.environments.primeintellect.lgc.env import Actor
 from AffineFoundation.affinetes.environments.primeintellect.mth.env import Actor as MTHActor
 from AffineFoundation.affinetes.environments.primeintellect.sci.env import Actor as SCIActor
 
+swe_module = importlib.import_module('AffineFoundation.affinetes.environments.SWE-bench_Pro-os.env')
+SWEActor = swe_module.Actor
+
 # Environment name to port mapping (from .env)
 Actor_Mapping = {
     # Affine environments
@@ -53,8 +57,12 @@ Actor_Mapping = {
     'sci': SCIActor,
     'mth': MTHActor,
     'lgc': LGCActor,
-    'cde': CDEActor
+    'cde': CDEActor,
+    # SWE-benchmark
+    'swe-pro': SWEActor
 }
+
+ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat'}
 
 def parse_args():
     """Parse command line arguments"""
@@ -91,7 +99,7 @@ async def main():
     args = parse_args()
 
     tasks = [
-        {"env": "sat", "task_id": 10},
+        # {"env": "sat", "task_id": 10},
         # {"env": "abd-v2", "task_id": 20010},
         # {"env": "ded-v2", "task_id": 20010},
         # {"env": "sci", "task_id": 10},
@@ -103,6 +111,7 @@ async def main():
         # {"env": "textcraft", "task_id": 10},
         # {"env": "babyai", "task_id": 10},
         # {"env": "webshop", "task_id": 10}
+        {"env": "swe-pro", "task_id": 0}
     ]
     
     model_name = os.getenv('MODEL_NAME')
@@ -124,12 +133,16 @@ async def main():
     
     for task in tasks:
         agent = Actor_Mapping[task['env']]()
-        result = await agent.local_evaluate(
-            model=model,
-            tokenizer=model_tokenizer,
-            task_type=get_base_task_name(task['env']),
-            task_id=task['task_id'],
-        )
+        # Build evaluate kwargs - only include task_type for specific envs
+        eval_kwargs = {
+            "model": model,
+            "tokenizer": model_tokenizer,
+            "task_id": task['task_id'],
+        }
+        if task['env'] in ENVS_WITH_TASK_TYPE:
+            eval_kwargs["task_type"] = get_base_task_name(task['env'])
+            
+        result = await agent.local_evaluate(**eval_kwargs)
     
         results.append(result)
     
