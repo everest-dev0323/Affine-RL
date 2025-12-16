@@ -22,12 +22,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Add the submodule root to PYTHONPATH
-submodule_path = os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/affine')
+submodule_path = os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/affine')
 sys.path.insert(0, os.path.abspath(submodule_path))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/primeintellect/cde')))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/primeintellect/lgc')))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/primeintellect/mth')))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/primeintellect/sci')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/primeintellect/cde')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/primeintellect/lgc')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/primeintellect/mth')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/primeintellect/sci')))
 
 
 # Load environment variables
