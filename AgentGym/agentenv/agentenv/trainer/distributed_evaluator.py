@@ -12,7 +12,7 @@ from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.utils import broadcast, gather_object
 from agentenv.controller import Agent
 from agentenv.controller.agent import Agent
-from agentenv.controller.task import BaseTask, GenerationConfig
+from agentenv.controller.task import BaseTask # GenerationConfig
 from agentenv.controller.utils import BaseTrainer
 from agentenv.trainer.utils import set_seed
 from datasets import Dataset, DatasetDict

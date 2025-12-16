@@ -1,6 +1,4 @@
-from typing import Any, Callable, Mapping, Optional, Sequence
-
-from transformers import GenerationConfig
+from typing import Any, Callable, Mapping, Optional, Sequence, List, Union
 
 from . import Agent, APIAgent, BaseEnvClient
 from .types import ConversationMessage, APIConversationMessage, ExperienceOutput, APIExperienceOutput
@@ -32,13 +30,14 @@ class BaseTask:
         agent: Agent | APIAgent,
         client: BaseEnvClient,
         idx: int,
-        generation_config: Optional[GenerationConfig] = None,
+        generation_config = None,
         max_rounds: Optional[int] = None,
     ) -> ExperienceOutput:
-        client.reset(idx)
+        env_id = client.create()
+        client.reset(env_id, idx)
         reward = 0.0
         done = False
-        state = client.observe()
+        state = client.observe(env_id)
         if isinstance(agent, Agent):
             tokenizer = agent.tokenizer
             conversation = list(client.conversation_start)
@@ -96,7 +95,7 @@ class BaseTask:
             else:
                 raise NotImplementedError
 
-            step_output = client.step(generated_text)
+            step_output = client.step(env_id, generated_text)
             state, reward, done = (
                 step_output.state,
                 step_output.reward,
@@ -151,9 +150,9 @@ class BaseTask:
         self,
         agent: Agent | APIAgent,
         idxs: Sequence[int],
-        generation_config: Optional[GenerationConfig] = None,
+        generation_config = None,
         max_rounds: Optional[int] = None,
-    ) -> list[ExperienceOutput]:
+    ) -> List[ExperienceOutput]:
         client = self.clients[0]
         result = [
             self._generate_experience_one(
@@ -170,10 +169,10 @@ class BaseTask:
     def generate_experience(
         self,
         agent: Agent | APIAgent,
-        idxs: Sequence[int] | int,
-        generation_config: Optional[GenerationConfig] = None,
+        idxs: Union[Sequence[int], int],
+        generation_config = None,
         max_rounds: Optional[int] = None,
-    ) -> list[ExperienceOutput]:
+    ) -> List[ExperienceOutput]:
         if isinstance(idxs, int):
             idxs = [idxs]
 
