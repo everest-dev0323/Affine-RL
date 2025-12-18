@@ -28,131 +28,72 @@ OUTPUT_DIR = "./sft_output"
 NUM_EPOCHS = 6
 TEST_SIZE = 0.1
 
+CHAT_TEMPLATE = r"""
+{%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0].role == 'system' %}
+        {{- messages[0].content + '\n\n' }}
+    {%- endif %}
+    {{- "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0].role == 'system' %}
+        {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- for message in messages %}
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {% generation %}
+        {{- '<|im_start|>' + message.role + '\n' + content }}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if (loop.first and content) or (not loop.first) %}
+                    {{- '\n' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+        {% endgeneration %}
+    {%- elif message.role == "tool" %}
+        {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+            {{- '<|im_start|>user' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content }}
+        {{- '\n</tool_response>' }}
+        {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}
+""".strip()
 
-
-def tokenize_item(item, tokenizer, max_input_length=12880):
-    """Processes a single item (conversation) using the logic from tokenize_fn."""
-
-    # It returns a list of dictionaries, as one conversation can generate multiple training examples (input_ids/labels pairs).
-    task_id, conversations = (item["task_id"], item["conversations"])
-
-    input_ids = []
-    labels = []
-
-    # 2. Iterate through messages to build token sequences
-    for idx, message in enumerate(conversations):
-        text = (
-            "<|im_start|>"
-            + message["role"]
-            + "\n"
-            + message["content"]
-            + "<|im_end|>"
-            + "\n"
-        )
-        input_encode = tokenizer(text, add_special_tokens=False)
-
-        if message["role"] == "assistant" and (len(conversations) == 2 or idx > 1):
-            input_ids.extend(input_encode["input_ids"])
-            labels.extend(
-                [-100] * 3 + input_encode["input_ids"][3:]
-            )  # Standard behavior: train on the assistant response
-
-        elif idx != len(conversations) - 1:
-            # For all other roles (user, system) or the first two turns (i<=1)
-            input_ids.extend(input_encode["input_ids"])
-            labels.extend(
-                [-100] * len(input_encode["input_ids"])
-            )  # Do not train on user/system turns
-
-        # 3. Handle conversation-ending example (if last message is assistant AND no reasoning content)
-    attention_mask = [1] * len(input_ids)
-    
-    input_ids = input_ids[: max_input_length]
-    labels = labels[: max_input_length]
-    attention_mask = attention_mask[: max_input_length]
-    
-    return {
-        "input_ids": input_ids,
-        "labels": labels,
-        "attention_mask": attention_mask,
-        "task_id": str(task_id),
-        "input_ids_max_length": len(
-            input_ids
-        ),  # Using current length as a placeholder; typically used to find the split point.
-    }
-
-
-class MyTrainer(SFTTrainer):
-    
-    def collate_fn(self, batch):
-        """Collate function for dataloaders"""
-        # The tokenizer can pad all fields at once if they're the same length
-        max_len = max(len(x["input_ids"]) for x in batch)
-        
-        # Manually pad labels since tokenizer doesn't handle them
-        padded_labels = []
-        for x in batch:
-            pad_len = max_len - len(x["labels"])
-            padded_labels.append(x["labels"] + [-100] * pad_len)
-        
-        # Use tokenizer for input_ids and attention_mask
-        to_pad = {
-            "input_ids": [x["input_ids"] for x in batch],
-            "attention_mask": [x["attention_mask"] for x in batch]
-        }
-        padded = self.processing_class.pad(to_pad, padding=True, return_tensors="pt")
-        
-        return {
-            "input_ids": padded["input_ids"],
-            "attention_mask": padded["attention_mask"],
-            "labels": torch.LongTensor(padded_labels)
-        }
-    def get_train_dataloader(self):
-        """
-        create train_dataset and train_dataloader using a for loop
-        """
-        
-        # def collate_fn(batch):
-        #     to_pad = {
-        #         "input_ids": [x["input_ids"] for x in batch],
-        #         "attention_mask": [x["attention_mask"] for x in batch]
-        #     }
-        #     padded = self.processing_class.pad(
-        #         to_pad,
-        #         padding=True
-        #     )
-        #     input_ids = torch.LongTensor(padded["input_ids"])
-
-        #     max_len = input_ids.shape[1]
-
-        #     attention_mask = torch.zeros_like(input_ids)
-        #     labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
-
-        #     for i, x in enumerate(batch):
-        #         mask = torch.tensor(x["attention_mask"], dtype=torch.long)
-        #         attention_mask[i, : mask.shape[0]] = mask
-
-        #         lab = torch.tensor(x["labels"], dtype=torch.long)
-        #         labels[i, : lab.shape[0]] = lab
-
-        #     padded = {
-        #         "input_ids": input_ids,
-        #         "attention_mask": attention_mask,
-        #         "labels": labels
-        #     }
-
-        #     return padded
-
-        train_dataloader = DataLoader(
-            self.train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            shuffle=True,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=False,
-            collate_fn=partial(self.collate_fn),
-        )
-        return train_dataloader
-    
 class MultiDatasetEvalCallback(TrainerCallback):
     def __init__(self, trainer, eval_datasets, eval_every_n_steps=500):
         self.trainer = trainer
@@ -201,6 +142,7 @@ class MultiDatasetEvalCallback(TrainerCallback):
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    tokenizer.chat_template = CHAT_TEMPLATE
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         low_cpu_mem_usage=True,
@@ -216,36 +158,18 @@ def main():
         model.resize_token_embeddings(len(tokenizer))
 
     agentgym_dataset = Dataset.from_list(load_jsonl(TRAIN_DATA_PATH + "/agentgym.jsonl"))
-    swe_dataset = Dataset.from_list(load_jsonl(TRAIN_DATA_PATH + "/swe.jsonl"))
-    cde_dataset = Dataset.from_list(load_jsonl(TRAIN_DATA_PATH + "/cde.jsonl"))
+    swe_dataset = Dataset.from_list(load_jsonl(TRAIN_DATA_PATH + "/swe.jsonl")).remove_columns("task_id")
+    cde_dataset = Dataset.from_list(load_jsonl(TRAIN_DATA_PATH + "/cde.jsonl")).remove_columns("task_id")
 
     prime_dataset = get_prime_dataset(PRIME_DATASET_REPOSITORY)
     affine_dataset = get_affine_dataset(AFFINE_DATASET_REPOSITORY)
 
     trained_dataset = concatenate_datasets(
         [agentgym_dataset, prime_dataset, affine_dataset]
-    )
+    ).remove_columns("task_id")
     
-    # Tokenization with tqdm
-    trained_dataset = trained_dataset.map(
-        lambda x: tokenize_item(x, tokenizer),
-        batched=False,
-        num_proc=2,
-    ).remove_columns(['task_id'])
-    
-    cde_dataset = cde_dataset.map(
-        lambda x: tokenize_item(x, tokenizer),
-        batched=False,
-        num_proc=2,
-    ).remove_columns(['task_id'])
-    
-    swe_dataset = swe_dataset.map(
-        lambda x: tokenize_item(x, tokenizer),
-        batched=False,
-        num_proc=2,
-    ).remove_columns(['task_id'])
-
     training_args = SFTConfig(
+        model_init_kwargs={"torch_dtype": torch.bfloat16},
         per_device_train_batch_size=1,
         gradient_accumulation_steps=2,
         dataloader_num_workers=2,
@@ -253,6 +177,10 @@ def main():
         learning_rate=5e-06,
         warmup_ratio=0.02,
         max_length=2048,
+        
+        # Conversation control
+        # dataset_text_field="conversations",
+        assistant_only_loss=True,
                 
         # Logging
         logging_strategy="steps",
@@ -267,8 +195,7 @@ def main():
         output_dir=OUTPUT_DIR,
         save_strategy="epoch",
         save_total_limit=3,
-        # deepspeed="./deepspeed_zero3.json",
-        # bf16=True,                # set True if using GPU with mixed precision
+        bf16=True,                # set True if using GPU with mixed precision
         remove_unused_columns=False,  # important because we pass labels
         report_to=["wandb"],
     )
@@ -278,6 +205,10 @@ def main():
         probabilities=[0.1, 0.3, 0.6],
         seed=42,
         stopping_strategy="first_exhausted",  # Stop when smallest dataset runs out
+    )
+    
+    train_dataset = train_dataset.rename_column(
+        "conversations", "messages"
     )
     
     A_eval = trained_dataset.shuffle(seed=42).select(range(min(500, len(trained_dataset))))
@@ -292,7 +223,7 @@ def main():
     
     # Initialize wandb
     wandb.init(
-        project="llm-finetuning",
+        project="SFT",
         name="multi-dataset-training",
         config={
             "dataset_A_size": len(trained_dataset),
@@ -303,7 +234,7 @@ def main():
         }
     )
     
-    trainer = MyTrainer(
+    trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -311,7 +242,7 @@ def main():
     )
     
     eval_callback = MultiDatasetEvalCallback(trainer, eval_datasets)
-    # trainer.add_callback(eval_callback)
+    trainer.add_callback(eval_callback)
     trainer.train()
     
     wandb.finish()
