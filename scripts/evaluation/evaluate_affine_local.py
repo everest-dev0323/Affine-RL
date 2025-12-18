@@ -111,7 +111,7 @@ async def main():
         # {"env": "textcraft", "task_id": 10},
         # {"env": "babyai", "task_id": 10},
         # {"env": "webshop", "task_id": 10}
-        {"env": "swe-pro", "task_id": 0}
+        {"env": "swe-pro", "task_id": 262}
     ]
     
     model_name = os.getenv('MODEL_NAME')

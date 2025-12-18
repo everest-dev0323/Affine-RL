@@ -1,6 +1,7 @@
 import os
 from functools import partial
 import json
+import random
 import torch
 from datasets import Dataset, load_dataset, concatenate_datasets, interleave_datasets
 from huggingface_hub import hf_hub_download
@@ -9,7 +10,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trl import SFTTrainer, SFTConfig
 import wandb
+import numpy as np
 
+import sys
+from pathlib import Path
 
 from src.data import get_affine_dataset, get_prime_dataset, load_jsonl
 from src.config import (
@@ -29,10 +33,6 @@ load_dotenv()
 # from peft import LoraConfig, get_peft_model, TaskType
 MODEL_NAME = os.getenv("MODEL_NAME")
 OUTPUT_DIR = "./sft_output"
-NUM_EPOCHS = 6
-TEST_SIZE = 0.1
-
-
 
 CHAT_TEMPLATE = r"""
 {%- if tools %}
@@ -101,67 +101,123 @@ CHAT_TEMPLATE = r"""
 """.strip()
 
 
-class MultiDatasetEvalCallback(TrainerCallback):
-    def __init__(self, trainer, eval_datasets, eval_every_n_steps=500):
-        self.trainer = trainer
-        self.eval_datasets = eval_datasets
-        self.eval_every_n_steps = eval_every_n_steps
+class StratifiedEvalCallback(TrainerCallback):
+    def __init__(self, sub_datasets, sample_size_per_dataset=300):
+        """
+        Args:
+            sub_datasets: dict of {"dataset_name": dataset}
+            sample_size_per_dataset: number of samples to take from each dataset
+        """
+        self.sub_datasets = sub_datasets
+        self.sample_size_per_dataset = sample_size_per_dataset
     
-    def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step % self.eval_every_n_steps == 0 and state.global_step > 0:
-            print(f"\n--- Evaluation at step {state.global_step} ---")
+    def on_evaluate(self, args, state, control, **kwargs):
+        # Sample from each sub-dataset
+        eval_subsets = []
+        for name, dataset in self.sub_datasets.items():
+            n_samples = min(self.sample_size_per_dataset, len(dataset))
+            indices = random.sample(range(len(dataset)), n_samples)
+            subset = dataset.select(indices)
+            eval_subsets.append(subset)
+        
+        # Concatenate all samples
+        combined_eval = concatenate_datasets(eval_subsets)
+        kwargs['trainer'].eval_dataset = combined_eval
+        return control
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        # This will be called after evaluation
+        if logs and 'eval_loss' in logs:
+            trainer = kwargs.get('trainer')
+            if trainer and hasattr(trainer, 'eval_dataset'):
+                # Evaluate each dataset separately
+                self.evaluate_per_dataset(trainer, logs, state)
+        return control
+    
+    def evaluate_per_dataset(self, trainer, logs, state):
+        """Evaluate each sub-dataset separately and log metrics"""
+        import torch.nn.functional as F
+        
+        metrics = {}
+        all_losses = []
+        
+        for name, dataset in self.sub_datasets.items():
+            # Sample from this specific dataset
+            n_samples = min(self.sample_size_per_dataset, len(dataset))
+            indices = random.sample(range(len(dataset)), n_samples)
+            subset = dataset.select(indices)
             
-            # Save model state
-            self.trainer.model.eval()
+            # Create dataloader
+            eval_dataloader = trainer.get_eval_dataloader(subset)
             
-            for name, dataset in self.eval_datasets.items():
-                # Create dataloader for this eval dataset
-                eval_dataloader = self.trainer.get_eval_dataloader(dataset)
-                
-                total_loss = 0
-                total_correct = 0
-                total_tokens = 0
-                
-                with torch.no_grad():
-                    for batch in tqdm(eval_dataloader, desc=f"Evaluating {name}"):
-                        # Move batch to device
-                        batch = {k: v.to(self.trainer.model.device) for k, v in batch.items()}
-                        
-                        outputs = self.trainer.model(**batch)
-                        loss = outputs.loss
-                        logits = outputs.logits
-                        
-                        # Calculate token accuracy
-                        # Shift logits and labels for next-token prediction
+            # Evaluate
+            model = trainer.model
+            model.eval()
+            
+            total_loss = 0
+            total_tokens = 0
+            correct_tokens = 0
+            total_perplexity = 0
+            n_batches = 0
+            
+            with torch.no_grad():
+                for batch in eval_dataloader:
+                    batch = {k: v.to(model.device) for k, v in batch.items()}
+                    
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    logits = outputs.logits
+                    
+                    # Loss
+                    total_loss += loss.item()
+                    
+                    # Token accuracy
+                    if 'labels' in batch:
+                        labels = batch['labels']
+                        # Shift for causal LM
                         shift_logits = logits[..., :-1, :].contiguous()
-                        shift_labels = batch['labels'][..., 1:].contiguous()
+                        shift_labels = labels[..., 1:].contiguous()
                         
-                        # Get predictions
-                        predictions = torch.argmax(shift_logits, dim=-1)
-                        
-                        # Mask padding tokens (usually -100 in labels)
+                        # Only count non-padding tokens
                         mask = shift_labels != -100
+                        predictions = shift_logits.argmax(dim=-1)
                         
-                        # Calculate accuracy
-                        correct = (predictions == shift_labels) & mask
-                        total_correct += correct.sum().item()
+                        correct_tokens += ((predictions == shift_labels) & mask).sum().item()
                         total_tokens += mask.sum().item()
-                        
-                        total_loss += loss.item() * batch['input_ids'].size(0)
-                
-                avg_loss = total_loss / len(dataset)
-                perplexity = torch.exp(torch.tensor(avg_loss)).item()
-                token_accuracy = total_correct / total_tokens if total_tokens > 0 else 0
-                
-                # Log to wandb
-                wandb_metrics = {
-                    f"{name}/loss": avg_loss,
-                    f"{name}/perplexity": perplexity,
-                    f"{name}/token_accuracy": token_accuracy,
-                }
-                wandb.log(wandb_metrics, step=state.global_step)
-                print(f"{name}: loss={avg_loss:.4f}, perplexity={perplexity:.4f}, token_accuracy={token_accuracy:.4f}")
-
+                    
+                    # Perplexity
+                    total_perplexity += torch.exp(loss).item()
+                    n_batches += 1
+            
+            # Calculate metrics for this dataset
+            avg_loss = total_loss / n_batches
+            avg_perplexity = total_perplexity / n_batches
+            token_accuracy = correct_tokens / total_tokens if total_tokens > 0 else 0
+            
+            all_losses.append(avg_loss)
+            
+            # Log per-dataset metrics
+            metrics[f"eval_{name}_loss"] = avg_loss
+            metrics[f"eval_{name}_perplexity"] = avg_perplexity
+            metrics[f"eval_{name}_token_accuracy"] = token_accuracy
+        
+        # Calculate average loss across all datasets
+        metrics["eval_loss"] = np.mean(all_losses)
+        
+        # Log all metrics
+        trainer.log(metrics)
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print(f"Evaluation at step {state.global_step}")
+        print(f"{'='*60}")
+        for name in self.sub_datasets.keys():
+            print(f"{name}:")
+            print(f"  Loss: {metrics[f'eval_{name}_loss']:.4f}")
+            print(f"  Perplexity: {metrics[f'eval_{name}_perplexity']:.4f}")
+            print(f"  Token Accuracy: {metrics[f'eval_{name}_token_accuracy']:.4f}")
+        print(f"\nAverage Loss: {metrics['eval_loss']:.4f}")
+        print(f"{'='*60}\n")
 
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
@@ -190,15 +246,18 @@ affine_dataset = get_affine_dataset(AFFINE_DATASET_REPOSITORY)
 prime_dataset = prime_dataset.remove_columns("task_id")
 affine_dataset = affine_dataset.remove_columns("task_id")
 
-train_dataset = concatenate_datasets(
-    [agentgym_dataset, prime_dataset, affine_dataset, swe_dataset, cde_dataset]
+train_dataset = interleave_datasets(
+    [agentgym_dataset, prime_dataset, affine_dataset, swe_dataset, cde_dataset], 
+    probabilities=[0.1, 0.3, 0.3, 0.1, 0.2],
+    seed=42,
+    stopping_strategy="all_exhausted", 
 )
 
 training_args = SFTConfig(
     model_init_kwargs={"torch_dtype": torch.bfloat16},
     per_device_train_batch_size=1,
     gradient_accumulation_steps=2,
-    dataloader_num_workers=2,
+    # dataloader_num_workers=2,
     num_train_epochs=15,
     learning_rate=5e-06,
     warmup_ratio=0.02,
@@ -213,14 +272,17 @@ training_args = SFTConfig(
     logging_steps=10,
     
     # Evaluation
-    do_eval=False,
-    eval_strategy="no",
-    # eval_steps=500,
+    do_eval=True,
+    eval_strategy="steps",
+    eval_steps=100,
+    save_total_limit=3,
+    metric_for_best_model="loss",
+    greater_is_better=False,
     
     # Checkpointing
     output_dir=OUTPUT_DIR,
-    save_strategy="epoch",
-    save_total_limit=3,
+    save_strategy="steps",
+    save_steps=100,
     bf16=True,                # set True if using GPU with mixed precision
     remove_unused_columns=False,  # important because we pass labels
     report_to=["wandb"],
@@ -259,14 +321,29 @@ wandb.init(
     }
 )
 
+# Create dummy initial eval dataset
+initial_eval = train_dataset.shuffle(seed=42).select(list(range(min(100, len(train_dataset)))))
+
 trainer = SFTTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
+    eval_dataset=initial_eval,
     processing_class=tokenizer,
 )
 
-eval_callback = MultiDatasetEvalCallback(trainer, eval_datasets)
+sub_datasets = {
+    "AgentGym": agentgym_dataset,
+    "PrimeIntellect": prime_dataset,
+    "Affine": affine_dataset,
+    "CDE": cde_dataset,
+    "SWE": swe_dataset,
+}
+
+eval_callback = StratifiedEvalCallback(
+    sub_datasets=sub_datasets,
+    sample_size_per_dataset=300
+)
 trainer.add_callback(eval_callback)
 trainer.train()
 
