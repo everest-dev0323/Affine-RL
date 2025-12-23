@@ -48,6 +48,19 @@ source scripts/vllm_serve.sh
 python scripts/evaluate_all_tasks.py
 ```
 
+```python
+from src.evaluation import evaluate_one, evaluate_env
+
+# Evaluate single task on Affine environment
+result = await evaluate_one(model, "sat", task_id=10)
+
+# Evaluate single task on AgentGym environment
+result = await evaluate_one(model, "alfworld", task_id=5)
+
+# Evaluate multiple tasks
+results = await evaluate_env(model, "alfworld", task_ids=[1, 2, 3, 4, 5])
+```
+
 ## Training
 
 ### 1. Download dataset
