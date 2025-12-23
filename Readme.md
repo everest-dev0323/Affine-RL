@@ -22,7 +22,7 @@ pip install -e .
 
 ### 4. Install additional libraries
 ```bash
-pip install vllm mini-swe-agent
+pip install trl wandb peft vllm mini-swe-agent
 ```
 
 ### 5. Set up .env file
@@ -46,4 +46,11 @@ source scripts/vllm_serve.sh
 
 ```bash
 python scripts/evaluate_all_tasks.py
+```
+
+## Training
+
+### 1. Download dataset
+```bash
+hf download --repo-type dataset hongyu05/affine-dataset-1219 --local-dir datasets/train/all
 ```

@@ -50,6 +50,10 @@ task_ranges:
     min: 0
     max: 499
 
+  swe-pro:
+    min: 0
+    max: 731
+
 # Output configuration
 output:
   # Directory for evaluation reports

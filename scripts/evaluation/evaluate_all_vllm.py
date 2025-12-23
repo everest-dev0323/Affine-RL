@@ -49,6 +49,8 @@ ENVIRONMENT_PORTS = {
     'sciworld': int(os.getenv('AGENTGYM_SCIWORLD_PORT', 36003)),
     'textcraft': int(os.getenv('AGENTGYM_TEXTCRAFT_PORT', 36004)),
     'babyai': int(os.getenv('AGENTGYM_BABYAI_PORT', 36005)),
+    
+    'swe-pro': int(os.getenv('AFFINE_SWE_PORT', 38001)),
 }
 
 # Default config path
@@ -243,7 +245,7 @@ async def main():
     config = load_config(args.config)
 
     # Override config with CLI arguments
-    samples_per_env = args.samples or config.get('samples_per_env', 50)
+    samples_per_env = args.samples or config.get('samples_per_env', 10)
     random_seed = args.seed or config.get('random_seed', 42)
     task_ranges = config.get('task_ranges', {})
 
