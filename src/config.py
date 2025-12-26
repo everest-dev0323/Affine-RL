@@ -8,6 +8,7 @@ ENVIRONMENT_NAMES = ['affine:abd-v2', 'affine:ded-v2', 'ALFWORLD', 'WEBSHOP', 'S
 # ========== Huggingface Dataset ==========
 AFFINE_DATASET_REPOSITORY = "AffineFoundation/rl-python"
 PRIME_DATASET_REPOSITORY = "PrimeIntellect/INTELLECT-3-RL"
+LGC_DATASET_REPOSITORY = "AffineFoundation/affine-lgc"
 AGENTGYM_DATASET_REPOSITORY = "JuniorJR124/Old_dataset"
 
 TRAIN_DATA_PATH = "datasets/train/all"

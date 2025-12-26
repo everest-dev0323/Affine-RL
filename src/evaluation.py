@@ -263,6 +263,9 @@ async def evaluate_one(
     # Add seed if provided
     if seed is not None:
         eval_kwargs["seed"] = seed
+    
+    if env_lower == "swe-pro":
+        eval_kwargs["max_iterations"] = 1
 
     # Run evaluation
     result = await actor.local_evaluate(**eval_kwargs)

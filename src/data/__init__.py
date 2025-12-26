@@ -4,6 +4,7 @@ from src.data.logic import process_logic
 from src.config import (
     AFFINE_DATASET_REPOSITORY,
     PRIME_DATASET_REPOSITORY,
+    LGC_DATASET_REPOSITORY,
     ABD_PROMPT_TEMPLATE,
     DED_EXTRA_HINT,
     MTH_PROMPT,
@@ -53,20 +54,21 @@ def convert_to_conversation(dataset, task_name):
     return Dataset.from_list(converted)
 
 
-def get_affine_dataset(path: str = AFFINE_DATASET_REPOSITORY):
+def get_abd_dataset(path: str = AFFINE_DATASET_REPOSITORY):
     train_data = load_dataset(path, split="train")
     abd_data = train_data.map(
         handle_abd_data, remove_columns=train_data.column_names
-    ).select(range(20000, 23301))
+    )
+    return abd_data
 
+def get_ded_dataset(path: str = AFFINE_DATASET_REPOSITORY):
+    train_data = load_dataset(path, split="train")
     ded_data = train_data.map(
         handle_ded_data, remove_columns=train_data.column_names
-    ).select(range(20000, 23301))
+    )
+    return ded_data
 
-    return concatenate_datasets([abd_data, ded_data])
-
-
-def get_prime_dataset(path: str = PRIME_DATASET_REPOSITORY):
+def get_mth_dataset(path: str = PRIME_DATASET_REPOSITORY):
     mth_dataset = (
         load_dataset(path, "math", split="train").map(
             lambda x: {
@@ -74,9 +76,11 @@ def get_prime_dataset(path: str = PRIME_DATASET_REPOSITORY):
                 "answer": x["answer"],
             }
         )
-    ).select(range(1000))
+    )
     mth_dataset = convert_to_conversation(mth_dataset, "MTH")
+    return mth_dataset
 
+def get_sci_dataset(path: str = PRIME_DATASET_REPOSITORY):
     sci_dataset = (
         load_dataset(path, "science", split="train").map(
             lambda x: {
@@ -84,17 +88,18 @@ def get_prime_dataset(path: str = PRIME_DATASET_REPOSITORY):
                 "answer": x["answer"],
             }
         )
-    ).select(range(1000))
+    )
     sci_dataset = convert_to_conversation(sci_dataset, "SCI")
+    return sci_dataset
 
+def get_lgc_dataset(path: str = LGC_DATASET_REPOSITORY):
     lgc_dataset = (
-        load_dataset(path, "logic", split="train")
+        load_dataset(path, split="train")
         .map(process_logic)
         .select_columns(["question", "answer"])
-    ).select(range(1000))
+    )
     lgc_dataset = convert_to_conversation(lgc_dataset, "LGC")
-
-    return concatenate_datasets([mth_dataset, sci_dataset, lgc_dataset])
+    return lgc_dataset
 
 
 def load_jsonl(path):
