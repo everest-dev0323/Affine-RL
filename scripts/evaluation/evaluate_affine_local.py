@@ -111,7 +111,7 @@ async def main():
         # {"env": "textcraft", "task_id": 10},
         # {"env": "babyai", "task_id": 10},
         # {"env": "webshop", "task_id": 10}
-        {"env": "swe-pro", "task_id": 262}
+        {"env": "swe-pro", "task_id": 16}
     ]
     
     model_name = os.getenv('MODEL_NAME')
@@ -141,6 +141,9 @@ async def main():
         }
         if task['env'] in ENVS_WITH_TASK_TYPE:
             eval_kwargs["task_type"] = get_base_task_name(task['env'])
+        
+        if task['env'] == "swe-pro":
+            eval_kwargs["max_iterations"] = 1
             
         result = await agent.local_evaluate(**eval_kwargs)
     
