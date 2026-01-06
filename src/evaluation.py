@@ -20,16 +20,21 @@ load_dotenv()
 # Add submodule paths for environment imports
 submodule_base = os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments')
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'affine')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'trace')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'openspiel')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/cde')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc-v2')))
 
 from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
 from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
-from AffineFoundation.affinetes.environments.primeintellect.lgc.env import Actor as LGCActor
-from AffineFoundation.affinetes.environments.primeintellect.mth.env import Actor as MTHActor
-from AffineFoundation.affinetes.environments.primeintellect.sci.env import Actor as SCIActor
+# from AffineFoundation.affinetes.environments.primeintellect.lgc.env import Actor as LGCActor
+# from AffineFoundation.affinetes.environments.primeintellect.mth.env import Actor as MTHActor
+# from AffineFoundation.affinetes.environments.primeintellect.sci.env import Actor as SCIActor
+lgc2module = importlib.import_module('AffineFoundation.affinetes.environments.primeintellect.lgc-v2.env')
+LGC2Actor = lgc2module.Actor
 
 # AgentGym imports
 from agentenv.envs import (
@@ -44,6 +49,10 @@ from agentenv.controller import Agent, ChatMLTemplate
 swe_module = importlib.import_module('AffineFoundation.affinetes.environments.SWE-bench_Pro-os.env')
 SWEActor = swe_module.Actor
 
+
+from AffineFoundation.affinetes.environments.trace.env import Actor as PrintActor
+from AffineFoundation.affinetes.environments.openspiel.env import Actor as GameActor
+
 from src import get_base_task_name
 
 
@@ -56,12 +65,15 @@ ACTOR_MAPPING = {
     'ded': AffineActor,
     'ded-v2': AffineActor,
     # Prime Intellect environments
-    'sci': SCIActor,
-    'mth': MTHActor,
-    'lgc': LGCActor,
+    # 'sci': SCIActor,
+    # 'mth': MTHActor,
+    # 'lgc': LGCActor,
+    'lgc-v2': LGC2Actor,
     'cde': CDEActor,
     # SWE-benchmark
-    'swe-pro': SWEActor
+    'swe-pro': SWEActor, 
+    'print': PrintActor,
+    'game': GameActor
 }
 
 # AgentGym task class mapping
