@@ -19,17 +19,17 @@ load_dotenv()
 
 # Add submodule paths for environment imports
 submodule_base = os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments')
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'affine')))
+# sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'affine')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'trace')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'openspiel')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/cde')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
+# sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/cde')))
+# sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc')))
+# sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
+# sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc-v2')))
 
-from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
-from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
+# from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
+# from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
 # from AffineFoundation.affinetes.environments.primeintellect.lgc.env import Actor as LGCActor
 # from AffineFoundation.affinetes.environments.primeintellect.mth.env import Actor as MTHActor
 # from AffineFoundation.affinetes.environments.primeintellect.sci.env import Actor as SCIActor
@@ -37,17 +37,17 @@ lgc2module = importlib.import_module('AffineFoundation.affinetes.environments.pr
 LGC2Actor = lgc2module.Actor
 
 # AgentGym imports
-from agentenv.envs import (
-    AlfWorldTask,
-    BabyAITask,
-    SciworldTask,
-    TextCraftTask,
-    WebshopTask
-)
-from agentenv.controller import Agent, ChatMLTemplate
+# from agentenv.envs import (
+#     AlfWorldTask,
+#     BabyAITask,
+#     SciworldTask,
+#     TextCraftTask,
+#     WebshopTask
+# )
+# from agentenv.controller import Agent, ChatMLTemplate
 
-swe_module = importlib.import_module('AffineFoundation.affinetes.environments.SWE-bench_Pro-os.env')
-SWEActor = swe_module.Actor
+# swe_module = importlib.import_module('AffineFoundation.affinetes.environments.SWE-bench_Pro-os.env')
+# SWEActor = swe_module.Actor
 
 
 from AffineFoundation.affinetes.environments.trace.env import Actor as PrintActor
@@ -59,31 +59,31 @@ from src import get_base_task_name
 # Environment name to Actor class mapping (for Affine/PrimeIntellect/SWE)
 ACTOR_MAPPING = {
     # Affine environments
-    'sat': AffineActor,
-    'abd': AffineActor,
-    'abd-v2': AffineActor,
-    'ded': AffineActor,
-    'ded-v2': AffineActor,
+    # 'sat': AffineActor,
+    # 'abd': AffineActor,
+    # 'abd-v2': AffineActor,
+    # 'ded': AffineActor,
+    # 'ded-v2': AffineActor,
     # Prime Intellect environments
     # 'sci': SCIActor,
     # 'mth': MTHActor,
     # 'lgc': LGCActor,
     'lgc-v2': LGC2Actor,
-    'cde': CDEActor,
-    # SWE-benchmark
-    'swe-pro': SWEActor, 
+    # 'cde': CDEActor,
+    # # SWE-benchmark
+    # 'swe-pro': SWEActor, 
     'print': PrintActor,
     'game': GameActor
 }
 
 # AgentGym task class mapping
-AGENTGYM_TASK_MAPPING = {
-    'webshop': WebshopTask,
-    'alfworld': AlfWorldTask,
-    'babyai': BabyAITask,
-    'sciworld': SciworldTask,
-    'textcraft': TextCraftTask,
-}
+# AGENTGYM_TASK_MAPPING = {
+#     'webshop': WebshopTask,
+#     'alfworld': AlfWorldTask,
+#     'babyai': BabyAITask,
+#     'sciworld': SciworldTask,
+#     'textcraft': TextCraftTask,
+# }
 
 # AgentGym environment port mapping (from .env)
 AGENTGYM_PORTS = {
@@ -107,100 +107,100 @@ AGENTGYM_MAX_ROUNDS = {
 ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat', 'abd', 'ded'}
 
 
-def _evaluate_agentgym_one(
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
-    env: str,
-    task_id: int,
-    max_rounds: Optional[int] = None,
-    timeout: int = 2400,
-    env_server_host: str = "localhost",
-) -> Dict[str, Any]:
-    """
-    Evaluate a model on a single AgentGym task.
+# def _evaluate_agentgym_one(
+#     model: AutoModelForCausalLM,
+#     tokenizer: AutoTokenizer,
+#     env: str,
+#     task_id: int,
+#     max_rounds: Optional[int] = None,
+#     timeout: int = 2400,
+#     env_server_host: str = "localhost",
+# ) -> Dict[str, Any]:
+#     """
+#     Evaluate a model on a single AgentGym task.
 
-    Args:
-        model: HuggingFace AutoModelForCausalLM model
-        tokenizer: Tokenizer for the model
-        env: AgentGym environment name (alfworld, sciworld, textcraft, webshop, babyai)
-        task_id: Task ID to evaluate
-        max_rounds: Maximum interaction rounds (defaults to environment-specific value)
-        timeout: Timeout for environment server calls
-        env_server_host: Host for environment server (default: localhost)
+#     Args:
+#         model: HuggingFace AutoModelForCausalLM model
+#         tokenizer: Tokenizer for the model
+#         env: AgentGym environment name (alfworld, sciworld, textcraft, webshop, babyai)
+#         task_id: Task ID to evaluate
+#         max_rounds: Maximum interaction rounds (defaults to environment-specific value)
+#         timeout: Timeout for environment server calls
+#         env_server_host: Host for environment server (default: localhost)
 
-    Returns:
-        dict with evaluation results
-    """
-    start_time = time.time()
+#     Returns:
+#         dict with evaluation results
+#     """
+#     start_time = time.time()
 
-    env_lower = env.lower()
+#     env_lower = env.lower()
 
-    # Get task class and port
-    task_cls = AGENTGYM_TASK_MAPPING.get(env_lower)
-    port = AGENTGYM_PORTS.get(env_lower)
+#     # Get task class and port
+#     task_cls = AGENTGYM_TASK_MAPPING.get(env_lower)
+#     port = AGENTGYM_PORTS.get(env_lower)
 
-    if task_cls is None or port is None:
-        raise ValueError(f"Unknown AgentGym environment: {env}. Available: {list(AGENTGYM_TASK_MAPPING.keys())}")
+#     if task_cls is None or port is None:
+#         raise ValueError(f"Unknown AgentGym environment: {env}. Available: {list(AGENTGYM_TASK_MAPPING.keys())}")
 
-    # Use default max_rounds if not specified
-    if max_rounds is None:
-        max_rounds = AGENTGYM_MAX_ROUNDS.get(env_lower, 30)
+#     # Use default max_rounds if not specified
+#     if max_rounds is None:
+#         max_rounds = AGENTGYM_MAX_ROUNDS.get(env_lower, 30)
 
-    # Set up environment args
-    env_server_base = f"http://{env_server_host}:{port}"
-    env_args = {
-        "env_server_base": env_server_base,
-        "data_len": 200,
-        "timeout": timeout,
-    }
+#     # Set up environment args
+#     env_server_base = f"http://{env_server_host}:{port}"
+#     env_args = {
+#         "env_server_base": env_server_base,
+#         "data_len": 200,
+#         "timeout": timeout,
+#     }
 
-    # Create task and agent
-    task = task_cls(client_args=env_args, n_clients=1)
-    agent = Agent(model=model, tokenizer=tokenizer, chat_template=ChatMLTemplate())
+#     # Create task and agent
+#     task = task_cls(client_args=env_args, n_clients=1)
+#     agent = Agent(model=model, tokenizer=tokenizer, chat_template=ChatMLTemplate())
 
-    # Generate experience for single task
-    generation_config = GenerationConfig(
-        max_length=4096,
-        do_sample=False,
-        temperature=1.0,
-    )
+#     # Generate experience for single task
+#     generation_config = GenerationConfig(
+#         max_length=4096,
+#         do_sample=False,
+#         temperature=1.0,
+#     )
 
-    experiences = task.generate_experience(
-        agent=agent,
-        idxs=[task_id],
-        generation_config=generation_config,
-        max_rounds=max_rounds,
-    )
+#     experiences = task.generate_experience(
+#         agent=agent,
+#         idxs=[task_id],
+#         generation_config=generation_config,
+#         max_rounds=max_rounds,
+#     )
 
-    if not experiences:
-        return {
-            "score": 0.0,
-            "success": False,
-            "time_taken": time.time() - start_time,
-            "rollout": [],
-        }
+#     if not experiences:
+#         return {
+#             "score": 0.0,
+#             "success": False,
+#             "time_taken": time.time() - start_time,
+#             "rollout": [],
+#         }
 
-    exp = experiences[0]
-    reward = exp.reward
+#     exp = experiences[0]
+#     reward = exp.reward
 
-    # Convert conversation to rollout format
-    rollout = []
-    for msg in exp.conversation:
-        role = "assistant" if msg["from"] == "gpt" else "user"
-        rollout.append({
-            "role": role,
-            "content": msg["value"]
-        })
+#     # Convert conversation to rollout format
+#     rollout = []
+#     for msg in exp.conversation:
+#         role = "assistant" if msg["from"] == "gpt" else "user"
+#         rollout.append({
+#             "role": role,
+#             "content": msg["value"]
+#         })
 
-    # Determine success (reward == 1 or reward == 100 depending on env)
-    success = reward == 1.0 or reward == 100.0
+#     # Determine success (reward == 1 or reward == 100 depending on env)
+#     success = reward == 1.0 or reward == 100.0
 
-    return {
-        "score": float(reward),
-        "success": success,
-        "time_taken": time.time() - start_time,
-        "rollout": rollout,
-    }
+#     return {
+#         "score": float(reward),
+#         "success": success,
+#         "time_taken": time.time() - start_time,
+#         "rollout": rollout,
+#     }
 
 
 async def evaluate_one(
@@ -241,22 +241,22 @@ async def evaluate_one(
 
     env_lower = env.lower()
 
-    # Check if this is an AgentGym environment
-    if env_lower in AGENTGYM_TASK_MAPPING:
-        return _evaluate_agentgym_one(
-            model=model,
-            tokenizer=tokenizer,
-            env=env,
-            task_id=task_id,
-            max_rounds=max_rounds,
-            env_server_host=env_server_host,
-        )
+    # # Check if this is an AgentGym environment
+    # if env_lower in AGENTGYM_TASK_MAPPING:
+    #     return _evaluate_agentgym_one(
+    #         model=model,
+    #         tokenizer=tokenizer,
+    #         env=env,
+    #         task_id=task_id,
+    #         max_rounds=max_rounds,
+    #         env_server_host=env_server_host,
+    #     )
 
     # Handle Affine/PrimeIntellect/SWE environments
     actor_cls = ACTOR_MAPPING.get(env_lower)
-    if actor_cls is None:
-        all_envs = list(ACTOR_MAPPING.keys()) + list(AGENTGYM_TASK_MAPPING.keys())
-        raise ValueError(f"Unknown environment: {env}. Available: {all_envs}")
+    # if actor_cls is None:
+    #     all_envs = list(ACTOR_MAPPING.keys()) + list(AGENTGYM_TASK_MAPPING.keys())
+    #     raise ValueError(f"Unknown environment: {env}. Available: {all_envs}")
 
     # Initialize actor
     actor = actor_cls()
