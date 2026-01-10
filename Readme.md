@@ -1,5 +1,9 @@
 ## Environment Setup
 
+```bash
+git clone https://github.com/Bambuuai/Affine-H.git --recurse-submodules
+```
+
 ### 1. Create Conda Environment
 ```bash
 conda create -n affine python=3.11
@@ -66,4 +70,6 @@ results = await evaluate_env(model, "alfworld", task_ids=[1, 2, 3, 4, 5])
 ### 1. Download dataset
 ```bash
 hf download --repo-type dataset hongyu05/affine-dataset-1219 --local-dir datasets/train/all
+
+hf download --repo-type dataset hongyu05/openspiel --local-dir data/openspiel
 ```

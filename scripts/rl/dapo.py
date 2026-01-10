@@ -75,7 +75,7 @@ class GRPO_DAPO_Trainer:
         # LoRA parameters
         lora_r: int = 16,
         lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
+        lora_dropout: float = 0,
         lora_target_modules: Optional[List[str]] = None,
         # Memory management
         gradient_accumulation_steps: int = 4,
