@@ -52,6 +52,7 @@ LGC2Actor = lgc2module.Actor
 
 from AffineFoundation.affinetes.environments.trace.env import Actor as PrintActor
 from AffineFoundation.affinetes.environments.openspiel.env import Actor as GameActor
+from AffineFoundation.affinetes.environments.arc_gen.env import Actor as ArcGenActor
 
 from src import get_base_task_name
 
@@ -73,7 +74,8 @@ ACTOR_MAPPING = {
     # # SWE-benchmark
     # 'swe-pro': SWEActor, 
     'print': PrintActor,
-    'game': GameActor
+    'game': GameActor,
+    'arc-gen': ArcGenActor,
 }
 
 # AgentGym task class mapping
