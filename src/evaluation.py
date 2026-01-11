@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'openspiel')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc-v2')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'arc_gen')))
 
 # from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
 # from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
