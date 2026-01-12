@@ -5,6 +5,9 @@ git clone https://github.com/Bambuuai/Affine-H.git --recurse-submodules
 ```
 
 ### 1. Create Conda Environment
+📖 **Reference Documentation**  
+[Conda Installation Guide - Linux Terminal Installer](https://www.anaconda.com/docs/getting-started/miniconda/install#linux-terminal-installer)
+
 ```bash
 conda create -n affine python=3.11
 conda activate affine
