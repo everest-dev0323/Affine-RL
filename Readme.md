@@ -10,34 +10,29 @@ conda create -n affine python=3.11
 conda activate affine
 ```
 
-### 2. Install Affinetes
-Navigate to the Affinetes directory and install it in editable mode:
+### 2. Install Python Libraries
 ```bash
-cd AffineFoundation/affinetes
-pip install -e .
+pip install -e AffineFoundation/affinetes
+pip install -r requirements.txt
+pip install -r AffineFoundation/affinetes/environments/openspiel/requirements.txt
 ```
 
-### 3. Install AgentGym
+<!-- ### 3. Install AgentGym
 Navigate to the AgentGym directory and install it in editable mode:
 ```bash
 cd AgentGym
 pip install -e .
-```
+``` -->
 
-### 4. Install additional libraries
-```bash
-pip install trl wandb peft vllm mini-swe-agent
-```
-
-### 5. Set up .env file
+### 3. Set up .env file
 ```bash
 cp .env.sample .env
 ```
 
-### 6. Pull Docker Images and Run Docker Containers
+<!-- ### 6. Pull Docker Images and Run Docker Containers
 ```bash
 source scripts/dockerenv_setup.sh
-```
+``` -->
 
 
 ## Evaluation
@@ -72,4 +67,9 @@ results = await evaluate_env(model, "alfworld", task_ids=[1, 2, 3, 4, 5])
 hf download --repo-type dataset hongyu05/affine-dataset-1219 --local-dir datasets/train/all
 
 hf download --repo-type dataset hongyu05/openspiel --local-dir data/openspiel
+```
+
+dataset generation
+```bash
+python scripts/generate_mcts_dataset.py --game liars_dice --num_trajectories 1000 --workers 180
 ```

@@ -12,7 +12,7 @@ Games:
 - clobber: 700,000,000 ~ 799,999,999
 
 Strategy: MCTS self-play (both players use MCTS)
-Save ONLY winning trajectories (score > 0.5)
+Save BOTH winning and losing trajectories
 """
 
 import os
@@ -26,6 +26,7 @@ import threading
 
 # Add path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/openspiel'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/affinetes/templates'))
 
 from env import play_game_dual
 
@@ -41,7 +42,7 @@ GAMES = {
     "clobber": (700_000_000, 799_999_999),
 }
 
-TARGET_TRAJECTORIES = 10_000
+TARGET_TRAJECTORIES = 1_000
 
 
 def generate_dual_trajectory(args):
@@ -80,8 +81,8 @@ def count_existing_trajectories(output_file: str) -> int:
     return count
 
 
-def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
-                               output_dir: str, mcts_sims: int):
+def generate_dataset_for_game(game_name: str, num_trajectories: int, workers: int,
+                               output_dir: str, mcts_sims: int = None):
     """Generate dataset for a single game with streaming writes and resume support"""
     task_id_min, task_id_max = GAMES[game_name]
 
@@ -89,16 +90,16 @@ def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
 
     # Count existing trajectories for resume
     existing_count = count_existing_trajectories(output_file)
-    remaining = max(0, num_wins - existing_count)
+    remaining = max(0, num_trajectories - existing_count)
 
     print(f"\n{'=' * 50}")
     print(f"Generating {game_name} dataset")
     print(f"{'=' * 50}")
     print(f"Task ID range: {task_id_min:,} ~ {task_id_max:,}")
-    print(f"Target winning trajectories: {num_wins:,}")
+    print(f"Target trajectories: {num_trajectories:,}")
     print(f"Already generated: {existing_count:,}")
     print(f"Remaining to generate: {remaining:,}")
-    print(f"MCTS simulations: {mcts_sims}")
+    print(f"MCTS simulations: {mcts_sims or 'default'}")
     print(f"Mode: Fully random (no fixed seed)")
 
     if remaining <= 0:
@@ -110,15 +111,14 @@ def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
     errors = 0
     file_lock = threading.Lock()
 
-    pbar = tqdm(total=remaining, desc=f"{game_name} wins")
+    pbar = tqdm(total=remaining, desc=f"{game_name} trajectories")
 
     # Open file for APPEND (resume support)
     with open(output_file, 'a') as f:
         while total_written < remaining:
-            # Calculate batch size - try to generate enough to get required wins
-            # Dual trajectory means ~50% win rate per game, so batch_size = remaining * 1.5
+            # Calculate batch size - dual trajectory means 2 trajectories per game
             still_needed = remaining - total_written
-            batch_size = min(max(100, int(still_needed * 1.5)), 1000)
+            batch_size = min(max(100, (still_needed + 1) // 2), 1000)
 
             # Generate batch of task args (fully random)
             task_args = [
@@ -127,7 +127,8 @@ def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
             ]
 
             # Process batch
-            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            executor = concurrent.futures.ProcessPoolExecutor(max_workers=workers)
+            try:
                 futures = {executor.submit(generate_dual_trajectory, arg): arg
                           for arg in task_args}
 
@@ -146,25 +147,30 @@ def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
                             errors += 1
                             continue
 
-                        # Only save winning trajectories
-                        if traj.get('success', False):
-                            trajectory_data = {
-                                "conversation": traj['conversation'],
-                                "score": traj['score'],
-                                "task_id": traj['task_id'],
-                                "seed": traj['seed'],
-                                "game_name": traj['game_name'],
-                                "player_id": traj['player_id'],
-                                "returns": traj['returns'],
-                            }
+                        # Save both winning and losing trajectories
+                        trajectory_data = {
+                            "conversation": traj['conversation'],
+                            "score": traj['score'],
+                            "task_id": traj['task_id'],
+                            "seed": traj['seed'],
+                            "game_name": traj['game_name'],
+                            "player_id": traj['player_id'],
+                            "returns": traj['returns'],
+                            "success": traj.get('success', False),
+                        }
 
-                            # Write immediately to file
-                            with file_lock:
-                                f.write(json.dumps(trajectory_data) + '\n')
-                                f.flush()
+                        # Write immediately to file
+                        with file_lock:
+                            f.write(json.dumps(trajectory_data) + '\n')
+                            f.flush()
 
-                            total_written += 1
-                            pbar.update(1)
+                        total_written += 1
+                        pbar.update(1)
+            finally:
+                # Cancel remaining futures and shutdown immediately
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
 
     pbar.close()
 
@@ -183,15 +189,15 @@ def generate_dataset_for_game(game_name: str, num_wins: int, workers: int,
 
 def main():
     parser = argparse.ArgumentParser(description='Generate MCTS game datasets')
-    parser.add_argument('--game', type=str, choices=list(GAMES.keys()) + ['all'], default='all',
+    parser.add_argument('--game', type=str, choices=list(GAMES.keys()) + ['all'], default='hex',
                         help='Game to generate dataset for (default: all)')
     parser.add_argument('--num_trajectories', type=int, default=TARGET_TRAJECTORIES,
-                        help='Number of winning trajectories per game')
+                        help='Number of trajectories per game (both winning and losing)')
     parser.add_argument('--workers', type=int, default=4,
                         help='Number of parallel workers')
     parser.add_argument('--output_dir', type=str, default='data/openspiel',
                         help='Output directory for datasets')
-    parser.add_argument('--mcts_sims', type=int, default=100,
+    parser.add_argument('--mcts_sims', type=int, default=None,
                         help='MCTS simulations per move')
     args = parser.parse_args()
 
@@ -205,7 +211,7 @@ def main():
     print(f"Games: {', '.join(games_to_process)}")
     print(f"Target trajectories per game: {args.num_trajectories:,}")
     print(f"Workers: {args.workers}")
-    print(f"MCTS simulations: {args.mcts_sims}")
+    print(f"MCTS simulations: {args.mcts_sims or 'default'}")
     print(f"Mode: Fully random (no fixed seed)")
 
     # Generate datasets
@@ -213,7 +219,7 @@ def main():
     for game_name in games_to_process:
         count = generate_dataset_for_game(
             game_name=game_name,
-            num_wins=args.num_trajectories,
+            num_trajectories=args.num_trajectories,
             workers=args.workers,
             output_dir=args.output_dir,
             mcts_sims=args.mcts_sims,
@@ -222,7 +228,7 @@ def main():
 
     print(f"\n{'=' * 50}")
     print(f"All datasets complete!")
-    print(f"Total winning trajectories: {total_trajectories:,}")
+    print(f"Total trajectories: {total_trajectories:,}")
     print(f"Output directory: {args.output_dir}")
 
 
