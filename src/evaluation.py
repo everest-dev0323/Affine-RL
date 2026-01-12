@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'openspiel')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
 sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc-v2')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'arc_gen')))
 
 # from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
 # from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
@@ -52,6 +53,7 @@ LGC2Actor = lgc2module.Actor
 
 from AffineFoundation.affinetes.environments.trace.env import Actor as PrintActor
 from AffineFoundation.affinetes.environments.openspiel.env import Actor as GameActor
+from AffineFoundation.affinetes.environments.arc_gen.env import Actor as ArcGenActor
 
 from src import get_base_task_name
 
@@ -73,7 +75,8 @@ ACTOR_MAPPING = {
     # # SWE-benchmark
     # 'swe-pro': SWEActor, 
     'print': PrintActor,
-    'game': GameActor
+    'game': GameActor,
+    'arc-gen': ArcGenActor,
 }
 
 # AgentGym task class mapping
