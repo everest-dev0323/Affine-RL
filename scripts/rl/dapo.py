@@ -2,14 +2,14 @@ import random
 import asyncio
 import torch
 import torch.nn.functional as F
-from torch.optim import Adam
-from unsloth import FastLanguageModel, is_bfloat16_supported
+from unsloth import FastLanguageModel
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 import gc
 import wandb
 import os
 from pathlib import Path
+import bitsandbytes as bnb
 
 from src.evaluation import ACTOR_MAPPING, ENVS_WITH_TASK_TYPE
 from src import get_base_task_name
@@ -17,16 +17,17 @@ from src import get_base_task_name
 
 class TaskDataset:
     """
-    Dataset class for task_env and range format.
+    Dataset class for task_env and range format, with support for disjoint ranges.
     
-    Format: Each item has task_env (str) and range [start, end]
+    Format: Each item has task_env (str) and range [[start, end], ...]
+    Each range is a list of [start, end] pairs, representing disjoint ranges.
     """
     def __init__(self, data: List[Dict]):
         """
         Args:
             data: List of dicts with format:
-                  [{'task_env': 'math', 'range': [0, 100]},
-                   {'task_env': 'coding', 'range': [0, 50]}, ...]
+                  [{'task_env': 'math', 'range': [[0, 100], [100, 200]]},
+                   {'task_env': 'coding', 'range': [[0, 50], [50, 100]]}, ...]
         """
         self.data = data
     
@@ -38,8 +39,12 @@ class TaskDataset:
             # Randomly choose a task environment
             config = random.choice(self.data)
             
+            range_weights = [end - start for start, end in config['range']]
+            
             # Randomly choose an ID within that environment's range
-            task_id = random.randint(config['range'][0], config['range'][1] - 1)
+            range_idx = random.choices(range(len(config['range'])), weights=range_weights, k=1)[0]
+            start, end = config['range'][range_idx]
+            task_id = random.randint(start, end - 1)
             
             samples.append({
                 'task_env': config['task_env'],
@@ -47,7 +52,50 @@ class TaskDataset:
             })
         
         return samples
+
+
+class DAPO_Config:
+    # Model
+    model_name: str = ""
+    learning_rate = 2e-5
+    num_samples_per_prompt = 2
+    # LoRA settings
+    lora_r = 16
+    lora_alpha = 32
+    lora_dropout = 0.05
+    lora_target_modules = None
+    use_token_level_loss = False
+    max_grad_norm = 1.0
+    # Memory management
+    gradient_accumulation_steps = 8
+    load_in_4bit = False
+    load_in_8bit = False
+    max_seq_length = 8192
+    max_new_tokens = 256
+    # DAPO
+    clip_epsilon = 0.2
+    clip_epsilon_high = 0.5
+    kl_coef = 0.01
     
+    # Unsloth optimizations
+    use_gradient_checkpointing = "unsloth"
+    use_rslora = False
+    use_dora = False
+    # WandB settings
+    use_wandb = True
+    wandb_project = "DAPO-training"
+    wandb_run_name = "DAPO-experiment-1"
+    wandb_config = {
+        'dataset': 'mixed_tasks',
+        'note': 'GRPO with DAPO on mixed task dataset'
+    }
+    # Checkpoint settings
+    checkpoint_dir="./checkpoints"
+    save_steps=100  # Save every 100 training steps
+    keep_last_n_checkpoints=3  # Keep only last 3 checkpoints
+    # Multi-turn settings
+    advantage_decay_gamma=0.95
+
 
 class GRPO_DAPO_Trainer:
     """
@@ -65,131 +113,76 @@ class GRPO_DAPO_Trainer:
     
     def __init__(
         self,
-        model_name: str,
-        learning_rate: float = 1e-5,
-        clip_epsilon: float = 0.2,
-        clip_epsilon_high: float = 5.0,
-        kl_coef: float = 0.01,
-        num_samples_per_prompt: int = 4,
-        use_token_level_loss: bool = False,
-        # LoRA parameters
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0,
-        lora_target_modules: Optional[List[str]] = None,
-        # Memory management
-        gradient_accumulation_steps: int = 4,
-        max_grad_norm: float = 1.0,
-        load_in_4bit: bool = False,
-        # Generation settings
-        max_seq_length: int = 2048,
-        max_new_tokens: int = 512,
-        # Unsloth specific
-        use_gradient_checkpointing: str = "unsloth",  # "unsloth" is faster
-        use_rslora: bool = False,  # Rank stabilized LoRA
-        use_dora: bool = False,  # Weight decomposed LoRA (slower but better)
-        # WandB settings
-        use_wandb: bool = True,
-        wandb_project: str = "dapo-training",
-        wandb_run_name: Optional[str] = None,
-        wandb_config: Optional[Dict] = None,
-        # Checkpoint settings
-        checkpoint_dir: str = "./checkpoints",
-        save_steps: int = 100,  # Save checkpoint every N training steps
-        keep_last_n_checkpoints: Optional[int] = 3,  # Keep only last N checkpoints (None = keep all)
+        config: DAPO_Config
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Memory management settings
-        self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.max_grad_norm = max_grad_norm
-        self.max_new_tokens = max_new_tokens
-        self.max_seq_length = max_seq_length
+        self.gradient_accumulation_steps = config.gradient_accumulation_steps
+        self.max_grad_norm = config.max_grad_norm
+        self.max_new_tokens = config.max_new_tokens
+        self.max_seq_length = config.max_seq_length
         
         # Checkpoint settings
-        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.save_steps = save_steps
-        self.keep_last_n_checkpoints = keep_last_n_checkpoints
+        self.save_steps = config.save_steps
+        self.keep_last_n_checkpoints = config.keep_last_n_checkpoints
         self.global_step = 0
         
         # WandB settings
-        self.use_wandb = use_wandb
+        self.use_wandb = config.use_wandb
         if self.use_wandb:
-            # Prepare config for wandb
-            config = {
-                'model_name': model_name,
-                'learning_rate': learning_rate,
-                'clip_epsilon': clip_epsilon,
-                'clip_epsilon_high': clip_epsilon_high,
-                'kl_coef': kl_coef,
-                'num_samples_per_prompt': num_samples_per_prompt,
-                'use_token_level_loss': use_token_level_loss,
-                'lora_r': lora_r,
-                'lora_alpha': lora_alpha,
-                'lora_dropout': lora_dropout,
-                'gradient_accumulation_steps': gradient_accumulation_steps,
-                'max_grad_norm': max_grad_norm,
-                'load_in_4bit': load_in_4bit,
-                'max_seq_length': max_seq_length,
-                'max_new_tokens': max_new_tokens,
-                'use_gradient_checkpointing': use_gradient_checkpointing,
-                'use_rslora': use_rslora,
-                'use_dora': use_dora,
-                'save_steps': save_steps,
-            }
-            
-            # Merge with user-provided config
-            if wandb_config:
-                config.update(wandb_config)
-            
             # Initialize wandb
             wandb.init(
-                project=wandb_project,
-                name=wandb_run_name,
+                project=config.wandb_project,
+                name=config.wandb_run_name,
                 config=config
             )
             print(f"WandB initialized: {wandb.run.name}")
         
         # Detect optimal dtype
         dtype = None  # Auto-detect (fp16 or bf16)
-        if is_bfloat16_supported():
-            print("Using bfloat16 for better numerical stability")
+        # if is_bfloat16_supported():
+        #     print("Using bfloat16 for better numerical stability")
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load model with Unsloth (MUCH faster than HF)
-        print(f"Loading model with Unsloth: {model_name}")
+        print(f"Loading model with Unsloth: {config.model_name}")
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=max_seq_length,
+            model_name=config.model_name,
+            max_seq_length=config.max_seq_length,
             dtype=dtype,
-            load_in_4bit=load_in_4bit,
+            load_in_4bit=config.load_in_4bit,
+            load_in_8bit=config.load_in_8bit,
             # Unsloth optimizations
-            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing=config.use_gradient_checkpointing,
         )
         
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        # self.tokenizer.pad_token = self.tokenizer.eos_token # not good
         self.tokenizer.padding_side = "left"
         
         # Apply Unsloth-optimized LoRA
         print("Applying Unsloth-optimized LoRA...")
-        if lora_target_modules is None:
+        if config.lora_target_modules is None:
             # Unsloth will auto-detect the best modules
-            lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+            config.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                                    "gate_proj", "up_proj", "down_proj"]
         
         self.model = FastLanguageModel.get_peft_model(
             self.model,
-            r=lora_r,
-            target_modules=lora_target_modules,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
+            r=config.lora_r,
+            target_modules=config.lora_target_modules,
+            lora_alpha=config.lora_alpha,
+            lora_dropout=config.lora_dropout,
             bias="none",
-            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing=config.use_gradient_checkpointing,
             random_state=42,
-            use_rslora=use_rslora,
+            use_rslora=config.use_rslora,
             loftq_config=None,
             # DoRA (weight decomposed LoRA) - slower but sometimes better
-            use_dora=use_dora,
+            use_dora=config.use_dora,
         )
         
         # Print trainable parameters
@@ -209,10 +202,10 @@ class GRPO_DAPO_Trainer:
         # Load reference model (frozen)
         print("Loading reference model...")
         self.ref_model, _ = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=max_seq_length,
+            model_name=config.model_name,
+            max_seq_length=config.max_seq_length,
             dtype=dtype,
-            load_in_4bit=load_in_4bit,
+            load_in_4bit=config.load_in_4bit,
             use_gradient_checkpointing="unsloth",
         )
         self.ref_model.eval()
@@ -221,15 +214,16 @@ class GRPO_DAPO_Trainer:
         
         # Optimizer (only trainable parameters)
         trainable_params_list = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = Adam(trainable_params_list, lr=learning_rate)
+        self.optimizer = bnb.optim.AdamW8bit(trainable_params_list, lr=config.learning_rate)
         
         # Hyperparameters
-        self.clip_epsilon = clip_epsilon
-        self.clip_epsilon_high = clip_epsilon_high
-        self.kl_coef = kl_coef
-        self.num_samples = num_samples_per_prompt
-        self.use_token_level_loss = use_token_level_loss
-        
+        self.clip_epsilon = config.clip_epsilon
+        self.clip_epsilon_high = config.clip_epsilon_high
+        self.kl_coef = config.kl_coef
+        self.num_samples = config.num_samples_per_prompt
+        self.use_token_level_loss = config.use_token_level_loss
+        self.advantage_decay_gamma = config.advantage_decay_gamma
+
         print(f"Trainer initialized with Unsloth optimizations")
         self._print_memory_stats()
     
@@ -287,7 +281,47 @@ class GRPO_DAPO_Trainer:
                 import shutil
                 shutil.rmtree(old_checkpoint)
                 print(f"Removed old checkpoint: {old_checkpoint}")
-    
+
+    def _extract_pairs_from_trajectory(self, trajectory: Dict) -> List[Dict]:
+        """
+        Extract multiple prompt-completion pairs from a multi-turn trajectory.
+
+        Args:
+            trajectory: Dict containing 'rollout' (list of messages), 'reward', etc.
+
+        Returns:
+            List of dicts, each containing:
+                - prompt: List of messages before this assistant turn
+                - completion: The assistant message (with reasoning)
+                - turn_index: 0-indexed turn number
+                - total_turns: Total number of assistant turns
+                - task_env, task_id, reward: Copied from trajectory
+        """
+        rollout = trajectory.get('rollout', [])
+        pairs = []
+
+        prompt_messages = []
+        for msg in rollout:
+            if msg['role'] == 'assistant':
+                # Create a prompt-completion pair
+                pairs.append({
+                    'prompt': prompt_messages.copy(),
+                    'completion': msg,
+                    'turn_index': len(pairs),
+                    'task_env': trajectory.get('task_env'),
+                    'task_id': trajectory.get('task_id'),
+                    'sample_idx': trajectory.get('sample_idx'),
+                    'reward': trajectory.get('reward'),
+                })
+            prompt_messages.append(msg)
+
+        # Add total_turns to each pair
+        num_turns = len(pairs)
+        for pair in pairs:
+            pair['total_turns'] = num_turns
+
+        return pairs
+
     @torch.no_grad()
     def generate_trajectories(
         self,
@@ -320,6 +354,8 @@ class GRPO_DAPO_Trainer:
         for task_idx, task in enumerate(tasks):
             task_env = task['task_env']
             task_id = task['task_id']
+            
+            seed = random.randint(0, 2**32 - 1)
 
             # Get the actor class for this environment
             actor_cls = ACTOR_MAPPING.get(task_env.lower())
@@ -337,6 +373,8 @@ class GRPO_DAPO_Trainer:
                     "model": self.model,
                     "tokenizer": self.tokenizer,
                     "task_id": task_id,
+                    "seed": seed,
+                    "temperature": 1.0
                 }
 
                 # Add task_type for specific environments
@@ -349,19 +387,30 @@ class GRPO_DAPO_Trainer:
 
                     # Extract rollout from result
                     rollout = []
+                    turn_log_probs = []  # List of log_probs per assistant turn
+                    turn_tokens = []  # List of full tokens per turn
+
                     if "extra" in result and "conversation" in result["extra"]:
                         rollout = result["extra"]["conversation"]
-                        
-                        log_probs, full_tokens = self._compute_log_probs_efficient(rollout)
-                        log_probs = log_probs.to(self.device)
+
+                        # Compute log_probs for each prompt-completion pair
+                        prompt_messages = []
+                        for msg in rollout:
+                            if msg['role'] == 'assistant':
+                                log_probs, full_tokens, _ = self._compute_log_probs_for_pair(
+                                    prompt_messages.copy(), msg
+                                )
+                                turn_log_probs.append(log_probs.to(self.device))
+                                turn_tokens.append(full_tokens)
+                            prompt_messages.append(msg)
 
                     trajectories.append({
                         'task_env': task_env,
                         'task_id': task_id,
                         'sample_idx': sample_idx,
                         'rollout': rollout,
-                        'log_probs': log_probs,
-                        'full_tokens': full_tokens,
+                        'turn_log_probs': turn_log_probs,  # List of log_probs per turn
+                        'turn_tokens': turn_tokens,  # List of tokens per turn
                         'reward': result.get('score', 0.0),
                         'success': result.get('success', False),
                         'time_taken': result.get('time_taken', 0.0),
@@ -423,7 +472,63 @@ class GRPO_DAPO_Trainer:
                 log_probs.append(token_log_prob)
         
         return torch.tensor(log_probs), full_tokens
-    
+
+    @torch.no_grad()
+    def _compute_log_probs_for_pair(self, prompt: List[Dict], completion: Dict):
+        """
+        Compute log probabilities for a single prompt-completion pair.
+
+        Args:
+            prompt: List of messages before the completion
+            completion: The assistant message to compute log probs for
+
+        Returns:
+            log_probs: Tensor of log probabilities for completion tokens
+            full_tokens: Full tokenized sequence
+            completion_mask: Boolean mask for completion tokens
+        """
+        # Build full conversation
+        full_conversation = prompt + [completion]
+
+        full_text = self.tokenizer.apply_chat_template(
+            full_conversation,
+            tokenize=False,
+            add_generation_prompt=False,
+            enable_thinking=True,
+        )
+
+        full_tokens = self.tokenizer.encode(full_text, add_special_tokens=False, return_tensors="pt").to(self.device)
+
+        # Get prompt length to create mask for only this completion
+        prompt_text = self.tokenizer.apply_chat_template(
+            prompt,
+            tokenize=False,
+            add_generation_prompt=True,  # Include the assistant prompt tokens
+            enable_thinking=True,
+        )
+        prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=False)
+        prompt_len = len(prompt_tokens)
+
+        # Forward pass
+        outputs = self.model(full_tokens)
+        logits = outputs.logits
+
+        # Compute log probs only for completion tokens
+        log_probs = []
+        completion_mask = []
+
+        for j in range(full_tokens.shape[1]):
+            if j >= prompt_len:  # Only completion tokens
+                token_id = full_tokens[0, j]
+                token_logits = logits[0, j - 1]
+                token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
+                log_probs.append(token_log_prob)
+                completion_mask.append(True)
+            else:
+                completion_mask.append(False)
+
+        return torch.stack(log_probs) if log_probs else torch.tensor([]), full_tokens, completion_mask
+
     def compute_advantages(self, trajectories: List[Dict]) -> torch.Tensor:
         """Compute group-based advantages (GRPO approach)."""
         prompt_groups = {}
@@ -445,9 +550,53 @@ class GRPO_DAPO_Trainer:
             
             for idx, adv in zip(indices, group_advantages):
                 advantages[idx] = adv
-        
+
         return advantages
-    
+
+    def compute_advantages_multiturn(self, trajectories: List[Dict]) -> List[Dict]:
+        """
+        Compute trajectory-level advantages, then extract pairs with decayed advantages.
+
+        Args:
+            trajectories: List of trajectory dicts with 'rollout', 'reward', etc.
+
+        Returns:
+            List of prompt-completion pair dicts with 'advantage' field added
+        """
+        gamma = self.advantage_decay_gamma
+
+        # Step 1: Group by task and compute trajectory-level advantages
+        prompt_groups = {}
+        for i, traj in enumerate(trajectories):
+            key = f"{traj['task_env']}_{traj['task_id']}"
+            if key not in prompt_groups:
+                prompt_groups[key] = []
+            prompt_groups[key].append((i, traj['reward']))
+
+        trajectory_advantages = {}
+        for key, group in prompt_groups.items():
+            rewards = torch.tensor([r for _, r in group], dtype=torch.float32)
+            normalized = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            for (idx, _), adv in zip(group, normalized):
+                trajectory_advantages[idx] = adv.item()
+
+        # Step 2: Extract prompt-completion pairs with decayed advantages
+        all_pairs = []
+        for i, traj in enumerate(trajectories):
+            traj_adv = trajectory_advantages[i]
+            pairs = self._extract_pairs_from_trajectory(traj)
+            num_turns = len(pairs)
+
+            for turn_idx, pair in enumerate(pairs):
+                # Decay: last turn gets full advantage, earlier turns get discounted
+                decay = gamma ** (num_turns - 1 - turn_idx)
+                pair['advantage'] = traj_adv * decay
+                pair['trajectory_idx'] = i
+                pair['decay_factor'] = decay
+                all_pairs.append(pair)
+
+        return all_pairs
+
     def dynamic_sampling_filter(self, trajectories: List[Dict]) -> List[Dict]:
         """DAPO: Filter out zero-gradient prompts."""
         taskid_groups = {}
@@ -463,7 +612,7 @@ class GRPO_DAPO_Trainer:
             if len(set(rewards)) > 1:
                 filtered.extend(group)
         
-        return filtered if filtered else trajectories
+        return filtered
     
     def train_step(
         self, 
@@ -631,7 +780,215 @@ class GRPO_DAPO_Trainer:
             }, step=self.global_step)
         
         return metrics
-    
+
+    def train_step_multiturn(
+        self,
+        trajectories: List[Dict],
+        use_dynamic_sampling: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Multi-turn training step with decayed advantages per turn.
+
+        Args:
+            trajectories: List of trajectory dicts from generate_trajectories
+            use_dynamic_sampling: Whether to filter zero-gradient prompts
+
+        Returns:
+            Dict of training metrics
+        """
+        # Ensure training mode
+        FastLanguageModel.for_training(self.model)
+
+        # DAPO: Dynamic sampling (at trajectory level)
+        if use_dynamic_sampling:
+            trajectories = self.dynamic_sampling_filter(trajectories)
+
+        if len(trajectories) == 0:
+            return {'error': 'No valid trajectories after filtering'}
+
+        # Extract prompt-completion pairs with decayed advantages
+        pairs = self.compute_advantages_multiturn(trajectories)
+
+        if len(pairs) == 0:
+            return {'error': 'No valid pairs extracted from trajectories'}
+
+        # Gradient accumulation
+        self.optimizer.zero_grad()
+
+        total_loss = 0
+        policy_losses = []
+        kl_divs = []
+
+        for i, pair in enumerate(pairs):
+            prompt = pair['prompt']
+            completion = pair['completion']
+            advantage = pair['advantage']
+            turn_idx = pair['turn_index']
+            traj_idx = pair['trajectory_idx']
+
+            # Get old log probs from trajectory
+            old_log_probs = trajectories[traj_idx]['turn_log_probs'][turn_idx]
+
+            # Build full conversation for this pair
+            full_conversation = prompt + [completion]
+
+            full_text = self.tokenizer.apply_chat_template(
+                full_conversation,
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=True,
+            )
+            full_tokens = self.tokenizer.encode(full_text, add_special_tokens=False, return_tensors="pt")
+            full_tokens = full_tokens.to(self.device)
+
+            # Get prompt length for masking
+            prompt_text = self.tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
+            )
+            prompt_tokens = self.tokenizer.encode(prompt_text, add_special_tokens=False)
+            prompt_len = len(prompt_tokens)
+
+            # Forward pass
+            outputs = self.model(full_tokens)
+            logits = outputs.logits
+
+            # Compute new log probs for completion tokens only
+            new_log_probs = []
+            for j in range(prompt_len, full_tokens.shape[1]):
+                token_id = full_tokens[0, j]
+                token_logits = logits[0, j - 1]
+                token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
+                new_log_probs.append(token_log_prob)
+
+            if not new_log_probs:
+                continue
+
+            new_log_probs = torch.stack(new_log_probs)
+
+            # Ensure shapes match
+            min_len = min(len(new_log_probs), len(old_log_probs))
+            new_log_probs = new_log_probs[:min_len]
+            old_log_probs = old_log_probs[:min_len]
+
+            # Compute ratio
+            ratio = torch.exp(new_log_probs - old_log_probs)
+
+            # DAPO: Asymmetric clipping
+            if advantage >= 0:
+                clipped_ratio = torch.clamp(
+                    ratio,
+                    1 - self.clip_epsilon,
+                    1 + self.clip_epsilon_high
+                )
+            else:
+                clipped_ratio = torch.clamp(
+                    ratio,
+                    1 - self.clip_epsilon,
+                    1 + self.clip_epsilon
+                )
+
+            # Policy loss
+            if self.use_token_level_loss:
+                policy_loss = -torch.min(
+                    ratio * advantage,
+                    clipped_ratio * advantage
+                ).sum()
+            else:
+                policy_loss = -torch.min(
+                    ratio * advantage,
+                    clipped_ratio * advantage
+                ).mean()
+
+            # KL divergence with reference model
+            with torch.no_grad():
+                ref_outputs = self.ref_model(full_tokens)
+                ref_logits = ref_outputs.logits
+
+                ref_log_probs = []
+                for j in range(prompt_len, full_tokens.shape[1]):
+                    token_id = full_tokens[0, j]
+                    token_logits = ref_logits[0, j - 1]
+                    ref_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
+                    ref_log_probs.append(ref_log_prob)
+
+                if ref_log_probs:
+                    ref_log_probs = torch.stack(ref_log_probs)[:min_len]
+
+            kl_div = (new_log_probs - ref_log_probs).mean()
+
+            # Total loss
+            loss = policy_loss + self.kl_coef * kl_div
+
+            # Scale loss for gradient accumulation
+            loss = loss / self.gradient_accumulation_steps
+
+            # Backward pass
+            loss.backward()
+
+            total_loss += loss.item() * self.gradient_accumulation_steps
+            policy_losses.append(policy_loss.item())
+            kl_divs.append(kl_div.item())
+
+            # Gradient accumulation step
+            if (i + 1) % self.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.max_grad_norm
+                )
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+                # Increment global step
+                self.global_step += 1
+
+                # Save checkpoint if needed
+                if self.global_step % self.save_steps == 0:
+                    self._save_checkpoint(self.global_step)
+
+                # Clear cache periodically
+                if (i + 1) % (self.gradient_accumulation_steps * 4) == 0:
+                    self._clear_memory()
+
+        # Final optimizer step
+        if len(pairs) % self.gradient_accumulation_steps != 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                self.max_grad_norm
+            )
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self.global_step += 1
+
+            # Save checkpoint if needed
+            if self.global_step % self.save_steps == 0:
+                self._save_checkpoint(self.global_step)
+
+        self._clear_memory()
+
+        metrics = {
+            'total_loss': total_loss,
+            'policy_loss': np.mean(policy_losses) if policy_losses else 0,
+            'kl_div': np.mean(kl_divs) if kl_divs else 0,
+            'num_trajectories': len(trajectories),
+            'num_pairs': len(pairs),
+            'global_step': self.global_step
+        }
+
+        # Log to wandb
+        if self.use_wandb:
+            wandb.log({
+                'train/total_loss': metrics['total_loss'],
+                'train/policy_loss': metrics['policy_loss'],
+                'train/kl_div': metrics['kl_div'],
+                'train/num_trajectories': metrics['num_trajectories'],
+                'train/num_pairs': metrics['num_pairs'],
+            }, step=self.global_step)
+
+        return metrics
+
     def save_model(self, output_dir: str, save_method: str = "merged_16bit"):
         """
         Save the model with Unsloth optimizations.
@@ -729,15 +1086,16 @@ class GRPO_DAPO_Trainer:
 
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     # =====================================================================
     # 1. Setup your task dataset
     # =====================================================================
     
     # Define your dataset with task_env and ranges
     dataset_config = [
-        {'task_env': 'math', 'range': [0, 100]},      # Math problems 0-99
-        {'task_env': 'coding', 'range': [0, 50]},     # Coding tasks 0-49
-        {'task_env': 'dialogue', 'range': [0, 200]},  # Dialogue tasks 0-199
+        {'task_env': 'game', 'range': [[0, 500000000], [600000000, 800000000]]},  # Dialogue tasks 0-199, 600-799
     ]
     
     # Create dataset
@@ -747,35 +1105,11 @@ if __name__ == "__main__":
     # 2. Initialize trainer with Unsloth and WandB
     # =====================================================================
     
+    config = DAPO_Config()
+    config.model_name = os.getenv("MODEL_NAME")
+    
     trainer = GRPO_DAPO_Trainer(
-        model_name="Qwen/Qwen3-0.6B",  # or your 30B model
-        learning_rate=2e-5,
-        num_samples_per_prompt=4,
-        # LoRA settings
-        lora_r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        # Memory management
-        gradient_accumulation_steps=8,
-        load_in_4bit=True,
-        max_seq_length=2048,
-        max_new_tokens=256,
-        # Unsloth optimizations
-        use_gradient_checkpointing="unsloth",
-        use_rslora=False,
-        use_dora=False,
-        # WandB settings
-        use_wandb=True,
-        wandb_project="grpo-dapo-training",
-        wandb_run_name="qwen-grpo-experiment-1",
-        wandb_config={
-            'dataset': 'mixed_tasks',
-            'note': 'GRPO with DAPO on mixed task dataset'
-        },
-        # Checkpoint settings
-        checkpoint_dir="./checkpoints",
-        save_steps=100,  # Save every 100 training steps
-        keep_last_n_checkpoints=3,  # Keep only last 3 checkpoints
+        config=config
     )
     
     # =====================================================================
@@ -783,7 +1117,7 @@ if __name__ == "__main__":
     # =====================================================================
     
     num_epochs = 3
-    tasks_per_epoch = 20  # Sample 20 tasks per epoch
+    tasks_per_epoch = 1  # Sample 20 tasks per epoch
     
     for epoch in range(num_epochs):
         print(f"\n{'='*60}")
@@ -823,10 +1157,12 @@ if __name__ == "__main__":
                     f'rewards/{env}_std': std_reward,
                 }, step=trainer.global_step)
         
-        # Train
-        print("\nTraining...")
-        metrics = trainer.train_step(trajectories, use_dynamic_sampling=True)
+        # Train with multi-turn support
+        print("\nTraining (multi-turn)...")
+        metrics = trainer.train_step_multiturn(trajectories, use_dynamic_sampling=True)
         print(f"Training metrics: {metrics}")
+        print(f"  - Trajectories: {metrics.get('num_trajectories', 'N/A')}")
+        print(f"  - Prompt-Completion Pairs: {metrics.get('num_pairs', 'N/A')}")
         
         trainer._print_memory_stats()
         
