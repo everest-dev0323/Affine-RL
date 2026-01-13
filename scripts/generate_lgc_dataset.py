@@ -106,7 +106,7 @@ def main():
                 existing_trajectories += 1
         print(f"Resuming from {existing_trajectories} existing trajectories.")
 
-    for _ in range(args.num_trajectories - existing_trajectories):
+    for _ in tqdm(range(args.num_trajectories - existing_trajectories), desc="Generating trajectories"):
         task_id = random.randint(0, task_id_range - 1) + task_type_id * 100000000
 
         try:
