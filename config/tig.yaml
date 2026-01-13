@@ -1,0 +1,52 @@
+# Think in Games (TiG) Training Configuration
+# Based on "Think in Games: Learning to Reason in Games via RL with LLMs"
+# Uses Unsloth for maximum efficiency
+
+# Model Configuration
+model_name: "Qwen/Qwen2.5-7B-Instruct"
+load_in_4bit: false
+load_in_8bit: false
+max_seq_length: 8192
+
+# Dataset Configuration
+# Expert dataset should be JSONL with format:
+# {"state": "...", "ground_truth_action": "action", "action_candidates": [...]}
+dataset_path: "data/openspiel-mcts"
+
+# LoRA Configuration
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+# lora_target_modules: null  # Auto-detect if not specified
+
+# Unsloth Optimizations
+use_gradient_checkpointing: "unsloth"
+use_rslora: false
+use_dora: false
+
+# Training Configuration
+learning_rate: 2.0e-5
+max_grad_norm: 1.0
+gradient_accumulation_steps: 8
+
+# TiG/GRPO Specific Parameters
+# G: Number of completions per state (paper uses 4-8)
+num_generations: 4
+max_new_tokens: 2048
+temperature: 1.0
+clip_epsilon: 0.2  # PPO clip range
+kl_coef: 0.01  # KL divergence penalty weight
+
+# Checkpoint Settings
+checkpoint_dir: "./checkpoints/tig"
+save_steps: 100
+keep_last_n_checkpoints: 3
+
+# WandB Settings
+use_wandb: true
+wandb_project: "tig-training"
+wandb_run_name: "tig-qwen-7b"
+
+# Reproducibility
+seed: 42
+
