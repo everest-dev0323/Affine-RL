@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+from datetime import datetime
 import gc
 import json
 import os
@@ -679,7 +680,6 @@ def main():
     parser.add_argument("--num_generations", type=int, default=None)
     parser.add_argument("--kl_coef", type=float, default=None)
     parser.add_argument("--temperature", type=float, default=None)
-    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true", help="Disable wandb logging")
@@ -711,8 +711,6 @@ def main():
         config.kl_coef = cli_args.kl_coef
     if cli_args.temperature:
         config.temperature = cli_args.temperature
-    if cli_args.seed:
-        config.seed = cli_args.seed
     if cli_args.wandb_project:
         config.wandb_project = cli_args.wandb_project
     if cli_args.wandb_run_name:
@@ -721,6 +719,7 @@ def main():
         config.use_wandb = False
 
     # Set seed
+    config.seed = datetime.now().timestamp()
     random.seed(config.seed)
     torch.manual_seed(config.seed)
     if torch.cuda.is_available():
