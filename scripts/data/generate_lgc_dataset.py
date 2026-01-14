@@ -112,7 +112,7 @@ def count_existing_trajectories(output_file: str) -> int:
 
 
 def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: int,
-                               output_dir: str):
+                               output_dir: str, timeout: int = 60):
     """Generate dataset for a single task type with streaming writes and resume support"""
     task_config = SUPPORTED_TASKS[task_type]
     task_type_id = task_config.get("task_type_id")
@@ -137,6 +137,7 @@ def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: in
     print(f"Already generated: {existing_count:,}")
     print(f"Remaining to generate: {remaining:,}")
     print(f"Workers: {workers}")
+    print(f"Timeout per task: {timeout}s")
 
     if remaining <= 0:
         print(f"Already have {existing_count} trajectories, skipping.")
@@ -144,6 +145,7 @@ def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: in
 
     total_written = 0
     errors = 0
+    timeouts = 0
     file_lock = threading.Lock()
 
     pbar = tqdm(total=remaining, desc=f"{task_type} trajectories")
@@ -167,11 +169,16 @@ def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: in
                 futures = {executor.submit(generate_trajectory, arg): arg
                           for arg in task_args}
 
-                for future in concurrent.futures.as_completed(futures):
+                for future in concurrent.futures.as_completed(futures, timeout=timeout * 2):
                     if total_written >= remaining:
                         break
 
-                    result = future.result()
+                    try:
+                        result = future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        timeouts += 1
+                        future.cancel()
+                        continue
 
                     if "error" in result:
                         errors += 1
@@ -184,6 +191,9 @@ def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: in
 
                     total_written += 1
                     pbar.update(1)
+            except concurrent.futures.TimeoutError:
+                # Batch-level timeout - restart with new batch
+                timeouts += 1
             finally:
                 # Cancel remaining futures and shutdown immediately
                 for future in futures:
@@ -198,6 +208,7 @@ def generate_dataset_for_task(task_type: str, num_trajectories: int, workers: in
     print(f"  Previously existing: {existing_count}")
     print(f"  Total in file: {total_in_file}")
     print(f"  Errors: {errors}")
+    print(f"  Timeouts: {timeouts}")
     print(f"  Output: {output_file}")
     print(f"  File size: {os.path.getsize(output_file) / 1024 / 1024:.2f} MB")
 
@@ -215,6 +226,8 @@ def main():
                         help='Number of parallel workers')
     parser.add_argument('--output_dir', type=str, default='data/lgc-v2',
                         help='Output directory for datasets')
+    parser.add_argument('--timeout', type=int, default=60,
+                        help='Timeout in seconds per task (default: 60)')
     args = parser.parse_args()
 
     # Create output directory
@@ -227,6 +240,7 @@ def main():
     print(f"Tasks: {', '.join(tasks_to_process)}")
     print(f"Target trajectories per task: {args.num_trajectories:,}")
     print(f"Workers: {args.workers}")
+    print(f"Timeout per task: {args.timeout}s")
 
     # Generate datasets
     total_trajectories = 0
@@ -236,6 +250,7 @@ def main():
             num_trajectories=args.num_trajectories,
             workers=args.workers,
             output_dir=args.output_dir,
+            timeout=args.timeout,
         )
         total_trajectories += count
 

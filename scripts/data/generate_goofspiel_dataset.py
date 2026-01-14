@@ -17,7 +17,8 @@ import concurrent.futures
 import threading
 
 # Add path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/openspiel'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/openspiel'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/affinetes/templates'))
 
 from env import play_game
 from game_config import create_game
