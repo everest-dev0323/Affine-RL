@@ -75,5 +75,6 @@ hf download --repo-type dataset hongyu05/openspiel --local-dir data/openspiel
 
 dataset generation
 ```bash
-python scripts/generate_mcts_dataset.py --game liars_dice --num_trajectories 1000 --workers 180
+python scripts/data/generate_mcts_dataset.py --game liars_dice --num_trajectories 1000 --workers 180
+python scripts/data/generate_lgc_dataset.py --task_type all --num_trajectories 100000 --workers 180
 ```
