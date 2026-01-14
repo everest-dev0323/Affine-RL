@@ -15,8 +15,8 @@ import concurrent.futures
 import threading
 
 # Add path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments/primeintellect/lgc-v2'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/affinetes/templates'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/primeintellect/lgc-v2'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/affinetes/templates'))
 
 from logic_task_v2 import LogicTaskV2
 
@@ -72,14 +72,14 @@ SUPPORTED_TASKS = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate PRINT datasets')
-    parser.add_argument('--num_trajectories', type=int, default=0,
+    parser = argparse.ArgumentParser(description='Generate LGC-v2 datasets')
+    parser.add_argument('--num_trajectories', type=int, default=100_000,
                         help='Number of trajectories per task')
-    parser.add_argument('--task_type', type=str, default="dyck_language",
-                        help='Number of trajectories per task')
+    parser.add_argument('--task_type', type=str, default="dyck_language2",
+                        help='Task type to generate')
     parser.add_argument('--workers', type=int, default=4,
                         help='Number of parallel workers')
-    parser.add_argument('--output_dir', type=str, default='data/logic',
+    parser.add_argument('--output_dir', type=str, default='data/lgc-v2',
                         help='Output directory for datasets')
     args = parser.parse_args()
     
@@ -90,7 +90,7 @@ def main():
 
     task_type_id = SUPPORTED_TASKS[args.task_type].get("task_type_id")
 
-    task_id_range = 100000000
+    task_id_range = 100_000_000
     if isinstance(task_type_id, list):
         task_id_range *= len(task_type_id)
         task_type_id = task_type_id[0]  # Use the first ID in the range for generation
@@ -107,7 +107,7 @@ def main():
         print(f"Resuming from {existing_trajectories} existing trajectories.")
 
     for _ in tqdm(range(args.num_trajectories - existing_trajectories), desc="Generating trajectories"):
-        task_id = random.randint(0, task_id_range - 1) + task_type_id * 100000000
+        task_id = random.randint(0, task_id_range - 1) + task_type_id * 100_000_000
 
         try:
             challenge = asyncio.run(logic_task.generate_dataset_by_id(task_id))
@@ -119,6 +119,8 @@ def main():
         conversation = [{"role": "user", "content": challenge.prompt}, {"role": "assistant", "content": challenge.extra["answer"]}]
 
         trajectory = {
+            "env": "lgc-v2",
+            "task_id": task_id,
             "conversation": conversation,
         }
         

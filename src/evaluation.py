@@ -18,23 +18,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 load_dotenv()
 
 # Add submodule paths for environment imports
-submodule_base = os.path.join(os.path.dirname(__file__), '../AffineFoundation/affinetes/environments')
+submodule_base = os.path.join(
+    os.path.dirname(__file__), "../AffineFoundation/affinetes"
+)
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, "affinetes/templates")))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'affine')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'trace')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'openspiel')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, "environments/trace")))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, "environments/openspiel")))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/cde')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/mth')))
 # sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/sci')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'primeintellect/lgc-v2')))
-sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, 'arc_gen')))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, "environments/primeintellect/lgc-v2")))
+sys.path.insert(0, os.path.abspath(os.path.join(submodule_base, "environments/arc_gen")))
 
 # from AffineFoundation.affinetes.environments.affine.env import Actor as AffineActor
 # from AffineFoundation.affinetes.environments.primeintellect.cde.env import Actor as CDEActor
 # from AffineFoundation.affinetes.environments.primeintellect.lgc.env import Actor as LGCActor
 # from AffineFoundation.affinetes.environments.primeintellect.mth.env import Actor as MTHActor
 # from AffineFoundation.affinetes.environments.primeintellect.sci.env import Actor as SCIActor
-lgc2module = importlib.import_module('AffineFoundation.affinetes.environments.primeintellect.lgc-v2.env')
+lgc2module = importlib.import_module(
+    "AffineFoundation.affinetes.environments.primeintellect.lgc-v2.env"
+)
 LGC2Actor = lgc2module.Actor
 
 # AgentGym imports
@@ -70,13 +75,13 @@ ACTOR_MAPPING = {
     # 'sci': SCIActor,
     # 'mth': MTHActor,
     # 'lgc': LGCActor,
-    'lgc-v2': LGC2Actor,
+    "lgc-v2": LGC2Actor,
     # 'cde': CDEActor,
     # # SWE-benchmark
-    # 'swe-pro': SWEActor, 
-    'print': PrintActor,
-    'game': GameActor,
-    'arc-gen': ArcGenActor,
+    # 'swe-pro': SWEActor,
+    "print": PrintActor,
+    "game": GameActor,
+    "arc-gen": ArcGenActor,
 }
 
 # AgentGym task class mapping
@@ -90,24 +95,24 @@ ACTOR_MAPPING = {
 
 # AgentGym environment port mapping (from .env)
 AGENTGYM_PORTS = {
-    'webshop': int(os.getenv('AGENTGYM_WEBSHOP_PORT', 36001)),
-    'alfworld': int(os.getenv('AGENTGYM_ALFWORLD_PORT', 36002)),
-    'sciworld': int(os.getenv('AGENTGYM_SCIWORLD_PORT', 36003)),
-    'textcraft': int(os.getenv('AGENTGYM_TEXTCRAFT_PORT', 36004)),
-    'babyai': int(os.getenv('AGENTGYM_BABYAI_PORT', 36005)),
+    "webshop": int(os.getenv("AGENTGYM_WEBSHOP_PORT", 36001)),
+    "alfworld": int(os.getenv("AGENTGYM_ALFWORLD_PORT", 36002)),
+    "sciworld": int(os.getenv("AGENTGYM_SCIWORLD_PORT", 36003)),
+    "textcraft": int(os.getenv("AGENTGYM_TEXTCRAFT_PORT", 36004)),
+    "babyai": int(os.getenv("AGENTGYM_BABYAI_PORT", 36005)),
 }
 
 # AgentGym default max rounds per environment
 AGENTGYM_MAX_ROUNDS = {
-    'webshop': 10,
-    'alfworld': 30,
-    'babyai': 20,
-    'sciworld': 20,
-    'textcraft': 20,
+    "webshop": 10,
+    "alfworld": 30,
+    "babyai": 20,
+    "sciworld": 20,
+    "textcraft": 20,
 }
 
 # Environments that require task_type parameter
-ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat', 'abd', 'ded'}
+ENVS_WITH_TASK_TYPE = {"abd-v2", "ded-v2", "sat", "abd", "ded"}
 
 
 # def _evaluate_agentgym_one(
@@ -278,7 +283,7 @@ async def evaluate_one(
     # Add seed if provided
     if seed is not None:
         eval_kwargs["seed"] = seed
-    
+
     if env_lower == "swe-pro":
         eval_kwargs["max_iterations"] = 1
 
@@ -353,3 +358,46 @@ async def evaluate_env(
         "extra": results,
     }
 
+
+async def reward_response(env: str, task_id: int, response: str, ground_truth: str) -> float:
+    """
+    Calculate reward for a response based on the environment type.
+
+    Args:
+        env: Environment name ('game', 'lgc-v2', 'print')
+        task_id: Task ID for the evaluation
+        response: Model's response
+        ground_truth: Expected answer (used for 'game' and 'print')
+
+    Returns:
+        Reward score (1.0 for correct, 0.0 for incorrect)
+    """
+    env_lower = env.lower()
+    
+
+    if env_lower == "lgc-v2":
+        # Use LogicTaskV2's evaluate method with verifier
+        # logic_task_v2 module is in sys.path (added at top of file)
+        from logic_task_v2 import LogicTaskV2  # noqa: E402
+
+        logic_task = LogicTaskV2()
+
+        # Generate challenge to get task metadata (task_type and game_data)
+        challenge = await logic_task.generate_dataset_by_id(task_id)
+
+        # Use the evaluate method which handles verifier logic
+        return await logic_task.evaluate(response, challenge)
+
+    else:
+        parsed_response = parse_response(response)
+        # Simple equality check for game and print environments
+        return 1.0 if parsed_response.strip() == ground_truth.strip() else 0.0
+    
+
+def parse_response(text: str) -> str:
+    """Parse response, removing <think> tags if present"""
+    if "<think>" in text:
+        if "</think>" not in text:
+            return ""
+        text = text.split("</think>")[-1].strip()
+    return text.strip()

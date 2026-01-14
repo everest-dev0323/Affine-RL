@@ -18,6 +18,7 @@ conda activate affine
 pip install -e AffineFoundation/affinetes
 pip install -r requirements.txt
 pip install -r AffineFoundation/affinetes/environments/openspiel/requirements.txt
+pip install -r AffineFoundation/affinetes/environments/arc_gen/requirements.txt
 ```
 
 <!-- ### 3. Install AgentGym
