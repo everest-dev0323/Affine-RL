@@ -64,7 +64,8 @@ def count_existing_trajectories(output_file: str) -> int:
     return count
 
 
-def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
+def generate_dataset(num_trajectories: int, workers: int, output_dir: str,
+                     timeout: int = 60, max_answer_length: int = 2000):
     """Generate dataset with streaming writes and resume support"""
     output_file = os.path.join(output_dir, 'print.jsonl')
 
@@ -80,6 +81,8 @@ def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
     print(f"Already generated: {existing_count:,}")
     print(f"Remaining to generate: {remaining:,}")
     print(f"Workers: {workers}")
+    print(f"Timeout per task: {timeout}s")
+    print(f"Max answer length: {max_answer_length} chars")
 
     if remaining <= 0:
         print(f"Already have {existing_count} trajectories, skipping.")
@@ -87,6 +90,8 @@ def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
 
     total_written = 0
     errors = 0
+    timeouts = 0
+    skipped_too_long = 0
     file_lock = threading.Lock()
 
     pbar = tqdm(total=remaining, desc="print trajectories")
@@ -107,14 +112,25 @@ def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
                 futures = {executor.submit(generate_trajectory, arg): arg
                           for arg in task_args}
 
-                for future in concurrent.futures.as_completed(futures):
+                for future in concurrent.futures.as_completed(futures, timeout=timeout * 2):
                     if total_written >= remaining:
                         break
 
-                    result = future.result()
+                    try:
+                        result = future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        timeouts += 1
+                        future.cancel()
+                        continue
 
                     if "error" in result:
                         errors += 1
+                        continue
+
+                    # Check assistant message length
+                    assistant_content = result["conversation"][1]["content"]
+                    if len(assistant_content) > max_answer_length:
+                        skipped_too_long += 1
                         continue
 
                     # Write immediately to file
@@ -124,6 +140,9 @@ def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
 
                     total_written += 1
                     pbar.update(1)
+            except concurrent.futures.TimeoutError:
+                # Batch-level timeout - restart with new batch
+                timeouts += 1
             finally:
                 # Cancel remaining futures and shutdown immediately
                 for future in futures:
@@ -138,6 +157,8 @@ def generate_dataset(num_trajectories: int, workers: int, output_dir: str):
     print(f"  Previously existing: {existing_count}")
     print(f"  Total in file: {total_in_file}")
     print(f"  Errors: {errors}")
+    print(f"  Timeouts: {timeouts}")
+    print(f"  Skipped (too long): {skipped_too_long}")
     print(f"  Output: {output_file}")
     print(f"  File size: {os.path.getsize(output_file) / 1024 / 1024:.2f} MB")
 
@@ -152,6 +173,10 @@ def main():
                         help='Number of parallel workers')
     parser.add_argument('--output_dir', type=str, default='data/print',
                         help='Output directory for datasets')
+    parser.add_argument('--timeout', type=int, default=60,
+                        help='Timeout in seconds per task (default: 60)')
+    parser.add_argument('--max_answer_length', type=int, default=2000,
+                        help='Max assistant message length in chars (default: 2000)')
     args = parser.parse_args()
 
     # Create output directory
@@ -160,12 +185,16 @@ def main():
     print(f"PRINT Dataset Generation")
     print(f"Target trajectories: {args.num_trajectories:,}")
     print(f"Workers: {args.workers}")
+    print(f"Timeout per task: {args.timeout}s")
+    print(f"Max answer length: {args.max_answer_length} chars")
 
     # Generate dataset
     total_trajectories = generate_dataset(
         num_trajectories=args.num_trajectories,
         workers=args.workers,
         output_dir=args.output_dir,
+        timeout=args.timeout,
+        max_answer_length=args.max_answer_length,
     )
 
     print(f"\n{'=' * 50}")
