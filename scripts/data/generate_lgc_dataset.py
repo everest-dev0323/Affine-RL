@@ -20,55 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundati
 
 from logic_task_v2 import LogicTaskV2
 
-SUPPORTED_TASKS = {
-    "dyck_language": {
-        "task_type_id": 0,  # Range: 0-99,999,999
-        "module": "games.dyck_language.generator",
-        "class": "DyckLanguageGenerator",
-        "default_config": {
-            "n_types": 3,
-            "total_length": 0,      # 0 = random (40-60)
-            "to_fill_length": 0,    # 0 = random (20%-50% of total)
-            "nesting_depth": 0      # 0 = no minimum depth requirement
-        }
-    },
-    "game_of_24": {
-        "task_type_id": 1,  # Range: 100,000,000-199,999,999
-        "module": "games.game_of_24.generator",
-        "class": "GameOf24Generator",
-        "default_config": {}  # All parameters derived from seed
-    },
-    "operation": {
-        "task_type_id": 2,  # Range: 200,000,000-299,999,999
-        "module": "games.operation.generator",
-        "class": "OperationGenerator",
-        "default_config": {}  # All parameters derived from seed
-    },
-    "cryptarithm": {
-        "task_type_id": 3,  # Range: 300,000,000-399,999,999
-        "module": "games.cryptarithm.generator",
-        "class": "CryptarithmGenerator",
-        "default_config": {}  # All parameters derived from seed
-    },
-    "dyck_language2": {
-        "task_type_id": [4, 5],  # Range: 400,000,000-599,999,999 (200M seeds)
-        "module": "games.dyck_language2.generator",
-        "class": "DyckLanguage2Generator",
-        "default_config": {}  # n_types and length derived from seed
-    },
-    "boolean_expressions": {
-        "task_type_id": 6,  # Range: 600,000,000-699,999,999
-        "module": "games.boolean_expressions.generator",
-        "class": "BooleanExpressionsGenerator",
-        "default_config": {}  # All parameters derived from seed
-    },
-    "sudoku": {
-        "task_type_id": 7,  # Range: 700,000,000-799,999,999
-        "module": "games.sudoku.generator",
-        "class": "SudokuGenerator",
-        "default_config": {}  # All parameters derived from seed
-    },
-}
+SUPPORTED_TASKS = LogicTaskV2.SUPPORTED_TASKS
 
 
 def generate_trajectory(args):
