@@ -11,7 +11,8 @@ max_seq_length: 8192
 # Dataset Configuration
 # Expert dataset should be JSONL with format:
 # {"state": "...", "ground_truth_action": "action", "action_candidates": [...]}
-dataset_path: "data/openspiel-mcts"
+dataset_path: "data"
+max_data_per_game: 10000
 
 # LoRA Configuration
 lora_r: 16
@@ -25,17 +26,20 @@ use_rslora: false
 use_dora: false
 
 # Training Configuration
-learning_rate: 2.0e-5
+num_epochs: 2
+learning_rate: 3.0e-6
 max_grad_norm: 1.0
 gradient_accumulation_steps: 8
 
 # TiG/GRPO Specific Parameters
 # G: Number of completions per state (paper uses 4-8)
-num_generations: 4
+prompts_per_step: 16
+num_generations: 8
 max_new_tokens: 2048
 temperature: 1.0
 clip_epsilon: 0.2  # PPO clip range
-kl_coef: 0.01  # KL divergence penalty weight
+clip_epsilon_high: 0.5
+kl_coef: 0.001  # KL divergence penalty weight
 
 # Checkpoint Settings
 checkpoint_dir: "./checkpoints/tig"
@@ -45,7 +49,7 @@ keep_last_n_checkpoints: 3
 # WandB Settings
 use_wandb: true
 wandb_project: "tig-training"
-wandb_run_name: "tig-qwen-7b"
+wandb_run_name: "tig-qwen-8b"
 
 # Reproducibility
 seed: 42

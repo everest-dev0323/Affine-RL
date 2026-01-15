@@ -52,50 +52,53 @@ class TiGConfig:
     """Configuration for TiG training."""
 
     # Model configuration
-    model_name: str = "Qwen/Qwen3-0.6B"
-    load_in_4bit: bool = False
-    load_in_8bit: bool = False
-    max_seq_length: int = 8192
+    model_name: str
+    load_in_4bit: bool
+    load_in_8bit: bool
+    max_seq_length: int
 
     # Dataset
-    dataset_path: str = "data/openspiel-mcts"  # Path to expert JSONL files
-    max_data_per_game: int = 10000
+    dataset_path: str
+    max_data_per_game: int
 
     # LoRA configuration
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    lora_target_modules = None  # Auto-detect if None
+    lora_r: int
+    lora_alpha: int
+    lora_dropout: float
+    lora_target_modules = None
 
     # Unsloth optimizations
     use_gradient_checkpointing = "unsloth"
-    use_rslora: bool = False
-    use_dora: bool = False
+    use_rslora: bool
+    use_dora: bool
 
     # Training configuration
-    learning_rate: float = 2e-5
-    max_grad_norm: float = 1.0
-    gradient_accumulation_steps: int = 16
+    num_epochs: int
+    learning_rate: float
+    max_grad_norm: float
+    gradient_accumulation_steps: int
 
     # TiG/GRPO specific parameters
-    num_generations: int = 4  # G completions per state (paper uses 4-8)
-    max_new_tokens: int = 2048  # Max completion length
-    temperature: float = 1.0  # Sampling temperature
-    clip_epsilon: float = 0.2  # PPO clip range
-    kl_coef: float = 0.01  # KL divergence penalty weight
+    prompts_per_step: int
+    num_generations: int # G completions per state (paper uses 4-8)
+    max_new_tokens: int # Max completion length
+    temperature: float  # Sampling temperature
+    clip_epsilon: float  # PPO clip range
+    clip_epsilon_high: float
+    kl_coef: float
 
     # Checkpoint settings
-    checkpoint_dir: str = "./checkpoints/tig"
-    save_steps: int = 100
-    keep_last_n_checkpoints: int = 3
+    checkpoint_dir: str
+    save_steps: int
+    keep_last_n_checkpoints: int
 
     # WandB settings
-    use_wandb: bool = True
-    wandb_project: str = "tig-training"
-    wandb_run_name: str = "tig-experiment"
+    use_wandb: bool
+    wandb_project: str
+    wandb_run_name: str
 
     # Reproducibility
-    seed: int = 42
+    seed: int
 
 
 class TiGTrainer:
@@ -210,6 +213,7 @@ class TiGTrainer:
 
         # Hyperparameters
         self.clip_epsilon = config.clip_epsilon
+        self.clip_epsilon_high = config.clip_epsilon_high
         self.kl_coef = config.kl_coef
         self.num_generations = config.num_generations
         self.temperature = config.temperature
@@ -240,29 +244,34 @@ class TiGTrainer:
         """
         data_list = []
         dataset_path = self.config.dataset_path
+        path_obj = Path(dataset_path)
 
-        # Handle both single file and directory
-        if os.path.isfile(dataset_path):
-            files = [dataset_path]
-        else:
-            files = glob(os.path.join(dataset_path, "*.jsonl"))
+        envs = [x for x in path_obj.iterdir() if x.is_dir()]
 
-        for filepath in files:
+        for env in envs:
+            task_files = list(env.glob("*.jsonl"))
             item_list = []
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        trajectory = json.loads(line)
-                        conversation = trajectory.get('conversation', [])
-                        for i in range(len(conversation)):
-                            if conversation[i].get('role') == 'assistant':
-                                item_list.append({
-                                    'prompt': conversation[:i],
-                                    'ground_truth_action': conversation[i].get('content')
-                                })
+            
+            for task_file in task_files:
+                with open(task_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            trajectory = json.loads(line)
+                            conversation = trajectory.get('conversation', [])
+                            for i in range(len(conversation)):
+                                if conversation[i].get('role') == 'assistant':
+                                    item_list.append({
+                                        'prompt': conversation[:i],
+                                        'ground_truth_action': conversation[i].get('content'),
+                                        'env': env.name,
+                                        'task': task_file.name,
+                                        'task_id': trajectory.get('task_id', None),
+                                        'seed': trajectory.get('seed', None),
+                                    })
+
             data_list.extend(item_list[:self.config.max_data_per_game])
         self.dataset = data_list
-        print(f"Loaded dataset: {len(data_list)} samples from {len(files)} file(s)")
+        print(f"Loaded dataset: {len(data_list)} samples")
 
     def extract_action_from_response(self, response: str) -> Optional[str]:
         """
@@ -671,18 +680,6 @@ def main():
 
     parser = argparse.ArgumentParser(description="Think in Games (TiG) Trainer")
     parser.add_argument("--config", type=str, help="Path to YAML config file")
-    parser.add_argument("--model_name", type=str, default=None)
-    parser.add_argument("--dataset_path", type=str, default=None)
-    parser.add_argument("--checkpoint_dir", type=str, default=None)
-    parser.add_argument("--num_epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=4, help="Number of samples per training step")
-    parser.add_argument("--learning_rate", type=float, default=None)
-    parser.add_argument("--num_generations", type=int, default=None)
-    parser.add_argument("--kl_coef", type=float, default=None)
-    parser.add_argument("--temperature", type=float, default=None)
-    parser.add_argument("--wandb_project", type=str, default=None)
-    parser.add_argument("--wandb_run_name", type=str, default=None)
-    parser.add_argument("--no_wandb", action="store_true", help="Disable wandb logging")
 
     cli_args = parser.parse_args()
 
@@ -696,28 +693,6 @@ def main():
             if hasattr(config, key):
                 setattr(config, key, value)
 
-    # Override with CLI args
-    if cli_args.model_name:
-        config.model_name = cli_args.model_name
-    if cli_args.dataset_path:
-        config.dataset_path = cli_args.dataset_path
-    if cli_args.checkpoint_dir:
-        config.checkpoint_dir = cli_args.checkpoint_dir
-    if cli_args.learning_rate:
-        config.learning_rate = cli_args.learning_rate
-    if cli_args.num_generations:
-        config.num_generations = cli_args.num_generations
-    if cli_args.kl_coef:
-        config.kl_coef = cli_args.kl_coef
-    if cli_args.temperature:
-        config.temperature = cli_args.temperature
-    if cli_args.wandb_project:
-        config.wandb_project = cli_args.wandb_project
-    if cli_args.wandb_run_name:
-        config.wandb_run_name = cli_args.wandb_run_name
-    if cli_args.no_wandb:
-        config.use_wandb = False
-
     # Set seed
     config.seed = datetime.now().timestamp()
     random.seed(config.seed)
@@ -729,8 +704,8 @@ def main():
     trainer = TiGTrainer(config)
 
     # Training parameters
-    num_epochs = cli_args.num_epochs
-    batch_size = cli_args.batch_size
+    num_epochs = config.num_epochs
+    batch_size = config.batch_size
 
     # Training loop
     print("\n" + "="*60)
