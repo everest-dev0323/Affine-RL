@@ -6,13 +6,14 @@
 model_name: "Qwen/Qwen2.5-7B-Instruct"
 load_in_4bit: false
 load_in_8bit: false
-max_seq_length: 8192
+max_seq_length: 32768
+batch_size: 64
 
 # Dataset Configuration
 # Expert dataset should be JSONL with format:
 # {"state": "...", "ground_truth_action": "action", "action_candidates": [...]}
 dataset_path: "data"
-max_data_per_game: 10000
+max_data_per_task: 10000
 
 # LoRA Configuration
 lora_r: 16
@@ -35,11 +36,12 @@ gradient_accumulation_steps: 8
 # G: Number of completions per state (paper uses 4-8)
 prompts_per_step: 16
 num_generations: 8
-max_new_tokens: 2048
+max_new_tokens: 8196
 temperature: 1.0
 clip_epsilon: 0.2  # PPO clip range
 clip_epsilon_high: 0.5
 kl_coef: 0.001  # KL divergence penalty weight
+train_micro_batch_size: 4  # Micro-batch size for training forward pass (reduce if OOM)
 
 # Checkpoint Settings
 checkpoint_dir: "./checkpoints/tig"

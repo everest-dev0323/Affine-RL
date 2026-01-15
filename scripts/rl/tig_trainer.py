@@ -78,7 +78,7 @@ class TiGConfig:
     gradient_accumulation_steps: int
 
     # TiG/GRPO specific parameters
-    prompts_per_step: int
+    batch_size: int
     num_generations: int # G completions per state (paper uses 4-8)
     max_new_tokens: int # Max completion length
     temperature: float  # Sampling temperature
@@ -247,7 +247,7 @@ class TiGTrainer:
         dataset_path = self.config.dataset_path
         path_obj = Path(dataset_path)
 
-        envs = [x for x in path_obj.iterdir() if x.is_dir()]
+        envs = [x for x in path_obj.iterdir() if x.is_dir() and not x.name.startswith(".")]
 
         print("\n" + "=" * 60)
         print("📂 LOADING DATASET")
@@ -379,7 +379,8 @@ class TiGTrainer:
         outputs = self.model.generate(
             expanded_input_ids,
             attention_mask=expanded_attention_mask,
-            max_new_tokens=self.max_new_tokens,
+            # max_new_tokens=self.max_new_tokens,
+            max_length=self.max_seq_length,
             temperature=self.temperature,
             do_sample=True,
             pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
@@ -576,7 +577,7 @@ class TiGTrainer:
         rewards = await asyncio.gather(*reward_tasks)
         return list(rewards)
 
-    async def train_step(self, samples: List[Dict]) -> Dict[str, float]:
+    async def train_step(self, samples: List[Dict], batch_idx: int = 0) -> Dict[str, float]:
         """
         Execute one training step on a batch of expert examples.
 
@@ -588,6 +589,7 @@ class TiGTrainer:
 
         Args:
             samples: List of expert data items with 'prompt', 'ground_truth_action', 'env', 'task_id'
+            batch_idx: Current batch index for logging
 
         Returns:
             Dict of training metrics
@@ -600,8 +602,10 @@ class TiGTrainer:
         total_kl_div = 0.0
         total_reward = 0.0
         num_completions = 0
+        num_skipped_samples = 0  # Track samples skipped due to DAPO (same rewards)
         policy_losses = []
         kl_divs = []
+        global_step_before = self.global_step  # Track if global_step changes
 
         # Collect all prompts and metadata for batched generation
         prompts = [item.get("prompt", []) for item in samples]
@@ -640,6 +644,7 @@ class TiGTrainer:
 
             # Skip if all rewards are same (no gradient signal) - DAPO dynamic sampling
             if len(set(rewards)) <= 1:
+                num_skipped_samples += 1
                 continue
 
             # Compute group-relative advantages
@@ -654,14 +659,31 @@ class TiGTrainer:
 
         if not flat_completions:
             # No valid completions to train on
-            return {
+            metrics = {
                 'loss': 0.0,
                 'policy_loss': 0.0,
                 'kl_div': 0.0,
                 'mean_reward': total_reward / max(len(samples) * self.num_generations, 1),
                 'num_completions': 0,
+                'num_skipped_samples': num_skipped_samples,
+                'num_samples': len(samples),
                 'global_step': self.global_step,
+                'global_step_delta': 0,
+                'batch_idx': batch_idx,
+                'backprop_happened': False,
             }
+            # Log to wandb even when no training happens (for monitoring)
+            if self.use_wandb:
+                wandb.log({
+                    'batch/idx': batch_idx,
+                    'batch/global_step': self.global_step,
+                    'batch/loss': 0.0,
+                    'batch/mean_reward': metrics['mean_reward'],
+                    'batch/num_completions': 0,
+                    'batch/num_skipped_samples': num_skipped_samples,
+                    'batch/backprop_happened': 0,
+                })
+            return metrics
 
         # Ensure training mode
         FastLanguageModel.for_training(self.model)
@@ -816,24 +838,45 @@ class TiGTrainer:
         self._clear_memory()
 
         n = max(num_completions, 1)
+        global_step_delta = self.global_step - global_step_before
         metrics = {
             'loss': total_loss / n,
             'policy_loss': np.mean(policy_losses) if policy_losses else 0,
             'kl_div': np.mean(kl_divs) if kl_divs else 0,
             'mean_reward': total_reward / (len(samples) * self.num_generations),
             'num_completions': num_completions,
+            'num_skipped_samples': num_skipped_samples,
+            'num_samples': len(samples),
             'global_step': self.global_step,
+            'global_step_delta': global_step_delta,
+            'batch_idx': batch_idx,
+            'backprop_happened': global_step_delta > 0,
         }
 
-        # Log to wandb
+        # Log to wandb (per-batch logging for detailed monitoring)
         if self.use_wandb:
+            # Batch-level logging (always logged, regardless of global_step)
             wandb.log({
-                'train/loss': metrics['loss'],
-                'train/policy_loss': metrics['policy_loss'],
-                'train/kl_div': metrics['kl_div'],
-                'train/mean_reward': metrics['mean_reward'],
-                'train/num_completions': metrics['num_completions'],
-            }, step=self.global_step)
+                'batch/idx': batch_idx,
+                'batch/global_step': self.global_step,
+                'batch/global_step_delta': global_step_delta,
+                'batch/loss': metrics['loss'],
+                'batch/policy_loss': metrics['policy_loss'],
+                'batch/kl_div': metrics['kl_div'],
+                'batch/mean_reward': metrics['mean_reward'],
+                'batch/num_completions': num_completions,
+                'batch/num_skipped_samples': num_skipped_samples,
+                'batch/backprop_happened': 1 if global_step_delta > 0 else 0,
+            })
+            # Train-level logging (using global_step as x-axis)
+            if global_step_delta > 0:
+                wandb.log({
+                    'train/loss': metrics['loss'],
+                    'train/policy_loss': metrics['policy_loss'],
+                    'train/kl_div': metrics['kl_div'],
+                    'train/mean_reward': metrics['mean_reward'],
+                    'train/num_completions': metrics['num_completions'],
+                }, step=self.global_step)
 
         return metrics
 
@@ -947,7 +990,7 @@ async def main():
     print(f"Model: {config.model_name}")
     print(f"Dataset: {config.dataset_path}")
     print(f"Epochs: {num_epochs}")
-    print(f"Batch size: {batch_size}")
+    print(f"Prompts per step: {batch_size}")
     print(f"Generations per sample: {config.num_generations}")
     print(f"Learning rate: {config.learning_rate}")
     print(f"KL penalty: {config.kl_coef}")
@@ -969,33 +1012,50 @@ async def main():
         epoch_loss = 0.0
         epoch_reward = 0.0
         num_batches = 0
+        total_batches = (len(trainer.dataset) + batch_size - 1) // batch_size
+        epoch_global_step_start = trainer.global_step
 
         for i in range(0, len(trainer.dataset), batch_size):
             batch = trainer.dataset[i:i + batch_size]
+            batch_idx = num_batches + 1
 
-            print(f"\nBatch {num_batches + 1}: Processing {len(batch)} samples...")
+            print(f"\n[Epoch {epoch + 1}/{num_epochs}] Batch {batch_idx}/{total_batches} "
+                  f"(global_step={trainer.global_step}): Processing {len(batch)} samples...")
 
-            metrics = await trainer.train_step(batch)
+            metrics = await trainer.train_step(batch, batch_idx=batch_idx)
 
             epoch_loss += metrics['loss']
             epoch_reward += metrics['mean_reward']
             num_batches += 1
 
+            # Detailed logging with batch number and global step
+            backprop_status = "✓ BACKPROP" if metrics['backprop_happened'] else "✗ NO BACKPROP"
+            print(f"  [{backprop_status}] global_step: {metrics['global_step']} (+{metrics['global_step_delta']})")
             print(f"  Loss: {metrics['loss']:.4f}, Reward: {metrics['mean_reward']:.4f}, "
-                  f"KL: {metrics['kl_div']:.4f}, Completions: {metrics['num_completions']}")
+                  f"KL: {metrics['kl_div']:.4f}")
+            print(f"  Completions: {metrics['num_completions']}, "
+                  f"Skipped (DAPO): {metrics['num_skipped_samples']}/{metrics['num_samples']} samples")
 
         # Epoch summary
         if num_batches > 0:
             avg_loss = epoch_loss / num_batches
             avg_reward = epoch_reward / num_batches
-            print(f"\nEpoch {epoch + 1} Summary:")
+            epoch_global_step_delta = trainer.global_step - epoch_global_step_start
+            print(f"\n{'='*60}")
+            print(f"Epoch {epoch + 1} Summary:")
             print(f"  Average Loss: {avg_loss:.4f}")
             print(f"  Average Reward: {avg_reward:.4f}")
+            print(f"  Batches processed: {num_batches}")
+            print(f"  Global step progress: {epoch_global_step_start} -> {trainer.global_step} "
+                  f"(+{epoch_global_step_delta} optimizer steps)")
+            print(f"{'='*60}")
 
             if trainer.use_wandb:
                 wandb.log({
                     'epoch/loss': avg_loss,
                     'epoch/reward': avg_reward,
+                    'epoch/num_batches': num_batches,
+                    'epoch/global_step_delta': epoch_global_step_delta,
                 }, step=trainer.global_step)
 
         # Save epoch checkpoint
