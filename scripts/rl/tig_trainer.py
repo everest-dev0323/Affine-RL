@@ -21,13 +21,11 @@ Usage:
 """
 
 import argparse
+import asyncio
 from datetime import datetime
 import gc
 import json
-import os
 import random
-import re
-from glob import glob
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -37,8 +35,9 @@ import torch
 import torch.nn.functional as F
 import wandb
 import yaml
-from tqdm import tqdm
 from unsloth import FastLanguageModel
+
+from src.evaluation import reward_response
 
 
 def load_config_from_yaml(config_path: str) -> dict:
@@ -59,7 +58,7 @@ class TiGConfig:
 
     # Dataset
     dataset_path: str
-    max_data_per_game: int
+    max_data_per_task: int
 
     # LoRA configuration
     lora_r: int
@@ -86,6 +85,7 @@ class TiGConfig:
     clip_epsilon: float  # PPO clip range
     clip_epsilon_high: float
     kl_coef: float
+    train_micro_batch_size: int = 4  # Micro-batch size for training forward pass (to avoid OOM)
 
     # Checkpoint settings
     checkpoint_dir: str
@@ -217,6 +217,7 @@ class TiGTrainer:
         self.kl_coef = config.kl_coef
         self.num_generations = config.num_generations
         self.temperature = config.temperature
+        self.train_micro_batch_size = getattr(config, 'train_micro_batch_size', 4)
 
         # Load expert dataset
         self._load_dataset()
@@ -248,11 +249,20 @@ class TiGTrainer:
 
         envs = [x for x in path_obj.iterdir() if x.is_dir()]
 
+        print("\n" + "=" * 60)
+        print("📂 LOADING DATASET")
+        print("=" * 60)
+        print(f"Dataset path: {dataset_path}")
+        print(f"Environments found: {len(envs)}")
+        print("-" * 60)
+
         for env in envs:
             task_files = list(env.glob("*.jsonl"))
-            item_list = []
-            
+            task_counts = {}
+
             for task_file in task_files:
+                item_list = []
+                task_sample_count = 0
                 with open(task_file, "r", encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
@@ -263,15 +273,24 @@ class TiGTrainer:
                                     item_list.append({
                                         'prompt': conversation[:i],
                                         'ground_truth_action': conversation[i].get('content'),
-                                        'env': env.name,
-                                        'task': task_file.name,
+                                        'env': env.stem,
+                                        'task': task_file.stem,
                                         'task_id': trajectory.get('task_id', None),
                                         'seed': trajectory.get('seed', None),
                                     })
+                                    task_sample_count += 1
+                data_list.extend(item_list[:self.config.max_data_per_task])
+                task_counts[task_file.stem] = task_sample_count
 
-            data_list.extend(item_list[:self.config.max_data_per_game])
+            print(f"\n🌍 Environment: {env.stem}")
+            print(f"   Tasks: {len(task_files)}")
+            for task_name, count in task_counts.items():
+                print(f"     • {task_name}: {count} samples")
+
         self.dataset = data_list
-        print(f"Loaded dataset: {len(data_list)} samples")
+        print("\n" + "-" * 60)
+        print(f"✅ DATASET LOADED: {len(data_list)} total samples")
+        print("=" * 60 + "\n")
 
     def extract_action_from_response(self, response: str) -> Optional[str]:
         """
@@ -294,6 +313,159 @@ class TiGTrainer:
         return action_str if action_str else None
 
     @torch.no_grad()
+    def generate_completions_batched(
+        self,
+        prompts: List[list],
+        num_samples: Optional[int] = None
+    ) -> List[List[Dict]]:
+        """
+        Generate multiple completions for multiple prompts in a batched manner.
+
+        This is more efficient than processing prompts one by one as it:
+        1. Batches all prompts together with padding
+        2. Generates G completions for all prompts in one batched generation
+
+        Args:
+            prompts: List of prompts, where each prompt is a list of messages
+            num_samples: Number of completions to generate per prompt
+
+        Returns:
+            List of lists: outer list corresponds to prompts, inner list contains
+            dicts with 'response', 'full_tokens', 'log_probs', 'prompt_length' keys
+        """
+        if num_samples is None:
+            num_samples = self.num_generations
+
+        if not prompts:
+            return []
+
+        # Enable fast inference mode
+        FastLanguageModel.for_inference(self.model)
+
+        # Tokenize all prompts with chat template
+        prompt_texts = [
+            self.tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True
+            )
+            for prompt in prompts
+        ]
+
+        # Batch tokenize with padding (left padding for generation)
+        tokenized = self.tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False,
+        ).to(self.device)
+
+        input_ids = tokenized.input_ids  # (batch_size, max_prompt_len)
+        attention_mask = tokenized.attention_mask  # (batch_size, max_prompt_len)
+
+        batch_size = input_ids.shape[0]
+
+        # Track original prompt lengths (before padding)
+        # With left padding, the actual content starts where mask becomes 1
+        prompt_lengths = attention_mask.sum(dim=1).tolist()  # List of actual prompt lengths
+
+        # Repeat each prompt num_samples times for batched generation
+        # Shape: (batch_size * num_samples, max_prompt_len)
+        expanded_input_ids = input_ids.repeat_interleave(num_samples, dim=0)
+        expanded_attention_mask = attention_mask.repeat_interleave(num_samples, dim=0)
+
+        # Generate all completions in one batch
+        outputs = self.model.generate(
+            expanded_input_ids,
+            attention_mask=expanded_attention_mask,
+            max_new_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+            do_sample=True,
+            pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+        )  # (batch_size * num_samples, max_prompt_len + max_new_tokens)
+
+        # Compute log probs for all completions in a batch
+        all_log_probs = self._compute_log_probs_batched(
+            expanded_input_ids, outputs, expanded_attention_mask
+        )
+
+        # Organize results by prompt
+        all_completions = []
+        max_prompt_len = input_ids.shape[1]
+
+        for prompt_idx in range(batch_size):
+            prompt_completions = []
+            prompt_length = prompt_lengths[prompt_idx]
+
+            for sample_idx in range(num_samples):
+                flat_idx = prompt_idx * num_samples + sample_idx
+                generated_ids = outputs[flat_idx]
+
+                # Extract completion tokens (after the padded prompt)
+                completion_ids = generated_ids[max_prompt_len:]
+
+                # Decode response
+                response = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+
+                prompt_completions.append({
+                    'response': response,
+                    'full_tokens': generated_ids,
+                    'log_probs': all_log_probs[flat_idx],
+                    'prompt_length': max_prompt_len,  # Use padded length for consistency
+                    'actual_prompt_length': prompt_length,
+                })
+
+            all_completions.append(prompt_completions)
+
+        return all_completions
+
+    @torch.no_grad()
+    def _compute_log_probs_batched(
+        self,
+        prompt_ids: torch.Tensor,
+        full_ids: torch.Tensor,
+        attention_mask: torch.Tensor
+    ) -> List[torch.Tensor]:
+        """
+        Compute log probabilities for completion tokens in a batched manner.
+
+        Args:
+            prompt_ids: Tokenized prompts (batch_size, prompt_len)
+            full_ids: Full sequences including completions (batch_size, full_len)
+            attention_mask: Attention mask for prompts (batch_size, prompt_len)
+
+        Returns:
+            List of tensors, each containing log probabilities for completion tokens
+        """
+        batch_size = full_ids.shape[0]
+        prompt_length = prompt_ids.shape[1]
+
+        # Forward pass on full sequences
+        outputs = self.model(full_ids)
+        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+        # Compute log probs for each sequence
+        all_log_probs = []
+        for i in range(batch_size):
+            log_probs = []
+            for j in range(prompt_length, full_ids.shape[1]):
+                token_id = full_ids[i, j]
+                # Skip padding tokens
+                if token_id == self.tokenizer.pad_token_id:
+                    break
+                token_logits = logits[i, j - 1]
+                token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
+                log_probs.append(token_log_prob)
+
+            if log_probs:
+                all_log_probs.append(torch.stack(log_probs))
+            else:
+                all_log_probs.append(torch.tensor([], device=self.device))
+
+        return all_log_probs
+
+    @torch.no_grad()
     def generate_completions(
         self,
         prompt: list,
@@ -302,6 +474,8 @@ class TiGTrainer:
         """
         Generate multiple completions for a given state using Unsloth.
 
+        Note: For better efficiency with multiple prompts, use generate_completions_batched().
+
         Args:
             prompt: list of messages
             num_samples: Number of completions to generate
@@ -309,58 +483,9 @@ class TiGTrainer:
         Returns:
             List of dicts with 'response', 'full_tokens', 'log_probs', 'prompt_length' keys
         """
-        if num_samples is None:
-            num_samples = self.num_generations
-
-        # Enable fast inference mode
-        FastLanguageModel.for_inference(self.model)
-
-        # Tokenize with chat template
-        prompt_text = self.tokenizer.apply_chat_template(
-            prompt,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True
-        )
-
-        input_ids = self.tokenizer.encode(
-            prompt_text,
-            return_tensors="pt",
-            add_special_tokens=False
-        ).to(self.device)
-
-        prompt_length = input_ids.shape[1]
-        completions = []
-
-        # Generate num_samples completions
-        for _ in range(num_samples):
-            outputs = self.model.generate(
-                input_ids,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-            )
-
-            generated_ids = outputs[0]
-            completion_ids = generated_ids[prompt_length:]
-
-            # Decode response
-            response = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-
-            # Compute log probs for the completion
-            log_probs = self._compute_log_probs_for_completion(
-                input_ids, generated_ids.unsqueeze(0), prompt_length
-            )
-
-            completions.append({
-                'response': response,
-                'full_tokens': generated_ids,
-                'log_probs': log_probs,
-                'prompt_length': prompt_length,
-            })
-
-        return completions
+        # Delegate to batched version with single prompt
+        results = self.generate_completions_batched([prompt], num_samples)
+        return results[0] if results else []
 
     @torch.no_grad()
     def _compute_log_probs_for_completion(
@@ -417,18 +542,52 @@ class TiGTrainer:
         advantages = (rewards_tensor - mean) / std
         return advantages
 
-    def train_step(self, samples: List[Dict]) -> Dict[str, float]:
+    async def _compute_rewards_for_completions(
+        self,
+        completions: List[Dict],
+        env: str,
+        task_id: int,
+        ground_truth_action: str
+    ) -> List[float]:
+        """
+        Compute rewards for a list of completions using reward_response.
+
+        Args:
+            completions: List of completion dicts with 'response' key
+            env: Environment name
+            task_id: Task ID for the evaluation
+            ground_truth_action: Expected answer
+
+        Returns:
+            List of rewards for each completion
+        """
+        # Create reward computation tasks for all completions
+        reward_tasks = [
+            reward_response(
+                env=env,
+                task_id=task_id,
+                response=comp['response'],
+                ground_truth=ground_truth_action
+            )
+            for comp in completions
+        ]
+
+        # Compute rewards in parallel
+        rewards = await asyncio.gather(*reward_tasks)
+        return list(rewards)
+
+    async def train_step(self, samples: List[Dict]) -> Dict[str, float]:
         """
         Execute one training step on a batch of expert examples.
 
         For each example:
-        1. Generate G completions with reasoning
-        2. Extract predicted actions and compute rewards
+        1. Generate G completions with reasoning (batched for efficiency)
+        2. Extract predicted actions and compute rewards using reward_response
         3. Compute group-relative advantages
         4. Compute GRPO loss with KL penalty
 
         Args:
-            samples: List of expert data items with 'state' and 'ground_truth_action'
+            samples: List of expert data items with 'prompt', 'ground_truth_action', 'env', 'task_id'
 
         Returns:
             Dict of training metrics
@@ -444,25 +603,40 @@ class TiGTrainer:
         policy_losses = []
         kl_divs = []
 
+        # Collect all prompts and metadata for batched generation
+        prompts = [item.get("prompt", []) for item in samples]
+        ground_truth_actions = [item["ground_truth_action"] for item in samples]
+        envs = [item.get("env", "game") for item in samples]
+        task_ids = [item.get("task_id", 0) for item in samples]
 
-        for item in samples:
-            prompt = item.get("prompt", [])
-            ground_truth_action = item["ground_truth_action"]
-            
-            # Generate completions
-            completions = self.generate_completions(prompt)
+        # Generate completions for all prompts in one batch
+        all_completions = self.generate_completions_batched(prompts)
 
-            # Compute rewards for each completion
-            rewards = []
-            for comp in completions:
-                predicted_action = self.extract_action_from_response(comp['response'])
-                reward = 1.0 if predicted_action == ground_truth_action else 0.0
-                rewards.append(reward)
+        # Compute rewards for all completions in parallel
+        reward_tasks = []
+        for completions, env, task_id, ground_truth_action in zip(
+            all_completions, envs, task_ids, ground_truth_actions
+        ):
+            reward_tasks.append(
+                self._compute_rewards_for_completions(
+                    completions, env, task_id, ground_truth_action
+                )
+            )
+
+        all_rewards = await asyncio.gather(*reward_tasks)
+
+        # Flatten all completions with their metadata for batched processing
+        flat_completions = []  # List of (comp, advantage, sample_idx)
+
+        for sample_idx, (completions, ground_truth_action) in enumerate(
+            zip(all_completions, ground_truth_actions)
+        ):
+            rewards = all_rewards[sample_idx]
+
+            # Assign rewards to completions
+            for comp, reward in zip(completions, rewards):
                 comp['reward'] = reward
                 total_reward += reward
-
-            # Ensure training mode
-            FastLanguageModel.for_training(self.model)
 
             # Skip if all rewards are same (no gradient signal) - DAPO dynamic sampling
             if len(set(rewards)) <= 1:
@@ -471,113 +645,173 @@ class TiGTrainer:
             # Compute group-relative advantages
             advantages = self.compute_advantages(rewards).to(self.device)
 
-            # Compute loss for each completion
+            # Add completions with their advantages to flat list
             for i, comp in enumerate(completions):
-                full_tokens = comp['full_tokens'].unsqueeze(0).to(self.device)
-                prompt_length = comp['prompt_length']
-                old_log_probs = comp['log_probs'].detach().to(self.device)
-                advantage = advantages[i]
+                flat_completions.append({
+                    'comp': comp,
+                    'advantage': advantages[i],
+                })
 
-                # Forward pass for current policy
-                outputs = self.model(full_tokens)
-                logits = outputs.logits
+        if not flat_completions:
+            # No valid completions to train on
+            return {
+                'loss': 0.0,
+                'policy_loss': 0.0,
+                'kl_div': 0.0,
+                'mean_reward': total_reward / max(len(samples) * self.num_generations, 1),
+                'num_completions': 0,
+                'global_step': self.global_step,
+            }
+
+        # Ensure training mode
+        FastLanguageModel.for_training(self.model)
+
+        # Process completions in micro-batches
+        micro_batch_size = self.train_micro_batch_size
+
+        for batch_start in range(0, len(flat_completions), micro_batch_size):
+            batch_end = min(batch_start + micro_batch_size, len(flat_completions))
+            batch_items = flat_completions[batch_start:batch_end]
+
+            # Prepare batch tensors with padding
+            batch_tokens = []
+            batch_prompt_lengths = []
+            batch_old_log_probs = []
+            batch_advantages = []
+
+            max_seq_len = max(item['comp']['full_tokens'].shape[0] for item in batch_items)
+
+            for item in batch_items:
+                comp = item['comp']
+                tokens = comp['full_tokens'].to(self.device)
+                prompt_length = comp['prompt_length']
+
+                # Pad to max_seq_len
+                if tokens.shape[0] < max_seq_len:
+                    pad_length = max_seq_len - tokens.shape[0]
+                    pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                    padding = torch.full((pad_length,), pad_token_id, device=self.device, dtype=tokens.dtype)
+                    tokens = torch.cat([tokens, padding])
+
+                batch_tokens.append(tokens)
+                batch_prompt_lengths.append(prompt_length)
+                batch_old_log_probs.append(comp['log_probs'].detach().to(self.device))
+                batch_advantages.append(item['advantage'])
+
+            # Stack into batch tensor
+            batch_input_ids = torch.stack(batch_tokens)  # (batch_size, max_seq_len)
+
+            # Create attention mask (1 for real tokens, 0 for padding)
+            attention_mask = (batch_input_ids != (self.tokenizer.pad_token_id or self.tokenizer.eos_token_id)).long()
+
+            # Batched forward pass for policy model
+            outputs = self.model(batch_input_ids, attention_mask=attention_mask)
+            policy_logits = outputs.logits  # (batch_size, max_seq_len, vocab_size)
+
+            # Batched forward pass for reference model
+            with torch.no_grad():
+                ref_outputs = self.ref_model(batch_input_ids, attention_mask=attention_mask)
+                ref_logits = ref_outputs.logits  # (batch_size, max_seq_len, vocab_size)
+
+            # Compute loss for each item in the batch
+            batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+            for idx, item in enumerate(batch_items):
+                prompt_length = batch_prompt_lengths[idx]
+                old_log_probs = batch_old_log_probs[idx]
+                advantage = batch_advantages[idx]
+                tokens = batch_tokens[idx]
 
                 # Compute new log probs for completion tokens
                 new_log_probs = []
-                for j in range(prompt_length, full_tokens.shape[1]):
-                    token_id = full_tokens[0, j]
-                    token_logits = logits[0, j - 1]
+                ref_log_probs_list = []
+
+                for j in range(prompt_length, len(tokens)):
+                    token_id = tokens[j]
+                    # Skip padding tokens
+                    if token_id == (self.tokenizer.pad_token_id or self.tokenizer.eos_token_id):
+                        break
+
+                    # Policy log prob
+                    token_logits = policy_logits[idx, j - 1]
                     token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
                     new_log_probs.append(token_log_prob)
+
+                    # Reference log prob
+                    ref_token_logits = ref_logits[idx, j - 1]
+                    ref_log_prob = F.log_softmax(ref_token_logits, dim=-1)[token_id]
+                    ref_log_probs_list.append(ref_log_prob)
 
                 if not new_log_probs:
                     continue
 
                 new_log_probs = torch.stack(new_log_probs)
+                ref_log_probs = torch.stack(ref_log_probs_list)
 
-                # Ensure shapes match
+                # Ensure shapes match with old log probs
                 min_len = min(len(new_log_probs), len(old_log_probs))
                 new_log_probs = new_log_probs[:min_len]
                 old_log_probs_slice = old_log_probs[:min_len]
+                ref_log_probs = ref_log_probs[:min_len]
 
                 # Compute ratio
                 ratio = torch.exp(new_log_probs - old_log_probs_slice)
 
-                # PPO-style clipped objective
-                clipped_ratio = torch.clamp(
-                    ratio,
-                    1 - self.clip_epsilon,
-                    1 + self.clip_epsilon
-                )
+                # DAPO: Asymmetric clipping
+                if advantage >= 0:
+                    clipped_ratio = torch.clamp(
+                        ratio,
+                        1 - self.clip_epsilon,
+                        1 + self.clip_epsilon_high
+                    )
+                else:
+                    clipped_ratio = torch.clamp(
+                        ratio,
+                        1 - self.clip_epsilon,
+                        1 + self.clip_epsilon
+                    )
                 policy_loss = -torch.min(
                     ratio * advantage,
                     clipped_ratio * advantage
                 ).mean()
 
-                # KL divergence with reference model
-                with torch.no_grad():
-                    ref_outputs = self.ref_model(full_tokens)
-                    ref_logits = ref_outputs.logits
-
-                    ref_log_probs = []
-                    for j in range(prompt_length, full_tokens.shape[1]):
-                        token_id = full_tokens[0, j]
-                        token_logits = ref_logits[0, j - 1]
-                        ref_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
-                        ref_log_probs.append(ref_log_prob)
-
-                    if ref_log_probs:
-                        ref_log_probs = torch.stack(ref_log_probs)[:min_len]
-
+                # KL divergence
                 kl_div = (new_log_probs - ref_log_probs).mean()
 
-                # Total loss
-                loss = policy_loss + self.kl_coef * kl_div
-                loss = loss / self.gradient_accumulation_steps
-
-                # Backward pass
-                loss.backward()
+                # Accumulate loss
+                item_loss = policy_loss + self.kl_coef * kl_div
+                batch_loss = batch_loss + item_loss
 
                 # Track metrics
-                total_loss += loss.item() * self.gradient_accumulation_steps
                 total_policy_loss += policy_loss.item()
                 total_kl_div += kl_div.item()
-                # total_reward += comp['reward']
-                num_completions += 1
                 policy_losses.append(policy_loss.item())
                 kl_divs.append(kl_div.item())
+                num_completions += 1
 
-                # Gradient accumulation step
-                if num_completions % self.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.max_grad_norm
-                    )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
+            # Average loss over batch and apply gradient accumulation scaling
+            if num_completions > 0:
+                batch_loss = batch_loss / len(batch_items) / self.gradient_accumulation_steps
+                batch_loss.backward()
+                total_loss += batch_loss.item() * self.gradient_accumulation_steps * len(batch_items)
 
-                    self.global_step += 1
+            # Gradient accumulation step
+            if (batch_end) % (self.gradient_accumulation_steps * micro_batch_size) == 0 or batch_end == len(flat_completions):
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.max_grad_norm
+                )
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
-                    # Save checkpoint if needed
-                    if self.global_step % self.save_steps == 0:
-                        self._save_checkpoint(self.global_step)
+                self.global_step += 1
 
-                    # Clear cache periodically
-                    if num_completions % (self.gradient_accumulation_steps * 4) == 0:
-                        self._clear_memory()
+                # Save checkpoint if needed
+                if self.global_step % self.save_steps == 0:
+                    self._save_checkpoint(self.global_step)
 
-        # Final optimizer step
-        if num_completions % self.gradient_accumulation_steps != 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                self.max_grad_norm
-            )
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.global_step += 1
-
-            if self.global_step % self.save_steps == 0:
-                self._save_checkpoint(self.global_step)
+                # Clear cache periodically
+                self._clear_memory()
 
         self._clear_memory()
 
@@ -673,7 +907,7 @@ class TiGTrainer:
             print("WandB run finished")
 
 
-def main():
+async def main():
     """Main entry point for TiG training."""
     from dotenv import load_dotenv
     load_dotenv()
@@ -690,11 +924,10 @@ def main():
     if cli_args.config:
         yaml_config = load_config_from_yaml(cli_args.config)
         for key, value in yaml_config.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
+            setattr(config, key, value)
 
     # Set seed
-    config.seed = datetime.now().timestamp()
+    config.seed = int(datetime.now().timestamp()) 
     random.seed(config.seed)
     torch.manual_seed(config.seed)
     if torch.cuda.is_available():
@@ -742,7 +975,7 @@ def main():
 
             print(f"\nBatch {num_batches + 1}: Processing {len(batch)} samples...")
 
-            metrics = trainer.train_step(batch)
+            metrics = await trainer.train_step(batch)
 
             epoch_loss += metrics['loss']
             epoch_reward += metrics['mean_reward']
@@ -788,4 +1021,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
