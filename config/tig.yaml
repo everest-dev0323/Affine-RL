@@ -7,7 +7,7 @@ model_name: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 load_in_4bit: false
 load_in_8bit: false
 max_seq_length: 32768
-batch_size: 64
+batch_size: 8
 
 # Dataset Configuration
 # Expert dataset should be JSONL with format:
@@ -34,14 +34,13 @@ gradient_accumulation_steps: 8
 
 # TiG/GRPO Specific Parameters
 # G: Number of completions per state (paper uses 4-8)
-prompts_per_step: 16
 num_generations: 8
 max_new_tokens: 8196
 temperature: 1.0
 clip_epsilon: 0.2  # PPO clip range
 clip_epsilon_high: 0.5
 kl_coef: 0.001  # KL divergence penalty weight
-train_micro_batch_size: 4  # Micro-batch size for training forward pass (reduce if OOM)
+train_micro_batch_size: 2  # Micro-batch size for training forward pass (reduce if OOM)
 
 # Checkpoint Settings
 checkpoint_dir: "./checkpoints/tig"

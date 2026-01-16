@@ -97,6 +97,10 @@ class TiGConfig:
     wandb_project: str
     wandb_run_name: str
 
+    # Trajectory logging settings
+    save_trajectories: bool = True
+    trajectory_dir: str = "trajectories"
+
     # Reproducibility
     seed: int
 
@@ -141,6 +145,16 @@ class TiGTrainer:
                 config=vars(config) if hasattr(config, '__dict__') else {},
             )
             print(f"WandB initialized: {wandb.run.name}")
+
+        # Trajectory saving settings
+        self.save_trajectories = getattr(config, 'save_trajectories', True)
+        self.trajectory_dir = Path(getattr(config, 'trajectory_dir', 'trajectories'))
+        if self.save_trajectories:
+            self.trajectory_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Trajectory directory: {self.trajectory_dir}")
+
+        # Per-task reward tracking: {(env, task): [rewards]}
+        self.task_reward_tracker: Dict[tuple, List[float]] = {}
 
         # Detect optimal dtype
         dtype = None  # Auto-detect (fp16 or bf16)
@@ -535,6 +549,132 @@ class TiGTrainer:
         advantages = (rewards_tensor - mean) / std
         return advantages
 
+    def _save_trajectory(
+        self,
+        env: str,
+        task: str,
+        prompt: list,
+        completions: List[Dict],
+        ground_truth_action: str,
+        batch_idx: int,
+        sample_idx: int
+    ):
+        """
+        Save a single trajectory to local JSONL file (organized by env/task).
+
+        Args:
+            env: Environment name
+            task: Task name
+            prompt: The prompt conversation
+            completions: List of completions with responses and rewards
+            ground_truth_action: The expected correct action
+            batch_idx: Current batch index
+            sample_idx: Sample index within the batch
+        """
+        if not self.save_trajectories:
+            return
+
+        # Create directory structure: trajectory_dir/env/task.jsonl
+        env_dir = self.trajectory_dir / env
+        env_dir.mkdir(parents=True, exist_ok=True)
+        trajectory_file = env_dir / f"{task}.jsonl"
+
+        # Build trajectory record
+        trajectory_record = {
+            'batch_idx': batch_idx,
+            'sample_idx': sample_idx,
+            'global_step': self.global_step,
+            'env': env,
+            'task': task,
+            'prompt': prompt,
+            'ground_truth_action': ground_truth_action,
+            'completions': [
+                {
+                    'response': comp['response'],
+                    'reward': comp.get('reward', 0.0),
+                }
+                for comp in completions
+            ],
+            'mean_reward': sum(comp.get('reward', 0.0) for comp in completions) / max(len(completions), 1),
+        }
+
+        # Append to JSONL file
+        with open(trajectory_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(trajectory_record, ensure_ascii=False) + '\n')
+
+    def _update_task_reward_tracker(self, env: str, task: str, rewards: List[float]):
+        """
+        Update the per-task reward tracker.
+
+        Args:
+            env: Environment name
+            task: Task name
+            rewards: List of rewards for completions
+        """
+        key = (env, task)
+        if key not in self.task_reward_tracker:
+            self.task_reward_tracker[key] = []
+        self.task_reward_tracker[key].extend(rewards)
+
+    def _log_per_task_rewards(self):
+        """
+        Log average rewards per env/task to wandb.
+        """
+        if not self.use_wandb or not self.task_reward_tracker:
+            return
+
+        task_reward_log = {}
+        for (env, task), rewards in self.task_reward_tracker.items():
+            if rewards:
+                avg_reward = sum(rewards) / len(rewards)
+                # Use hierarchical naming: reward/{env}/{task}
+                task_reward_log[f'reward/{env}/{task}'] = avg_reward
+                task_reward_log[f'reward/{env}/{task}_count'] = len(rewards)
+
+        if task_reward_log:
+            wandb.log(task_reward_log, step=self.global_step)
+
+    def _log_trajectories_to_wandb(self, trajectories: List[Dict]):
+        """
+        Log trajectories to wandb as a table.
+
+        Args:
+            trajectories: List of trajectory records
+        """
+        if not self.use_wandb or not trajectories:
+            return
+
+        # Create a wandb Table for trajectories
+        columns = ['batch_idx', 'env', 'task', 'mean_reward', 'prompt_preview', 'completion_preview']
+        table = wandb.Table(columns=columns)
+
+        for traj in trajectories:
+            # Create preview of prompt (last message)
+            prompt_preview = ""
+            if traj['prompt']:
+                last_msg = traj['prompt'][-1]
+                content = last_msg.get('content', '')
+                prompt_preview = content[:200] + "..." if len(content) > 200 else content
+
+            # Create preview of best completion
+            completions = traj.get('completions', [])
+            if completions:
+                best_comp = max(completions, key=lambda x: x.get('reward', 0))
+                comp_preview = best_comp['response'][:200] + "..." if len(best_comp['response']) > 200 else best_comp['response']
+            else:
+                comp_preview = ""
+
+            table.add_data(
+                traj['batch_idx'],
+                traj['env'],
+                traj['task'],
+                traj['mean_reward'],
+                prompt_preview,
+                comp_preview
+            )
+
+        wandb.log({'trajectories': table}, step=self.global_step)
+
     async def _compute_rewards_for_completions(
         self,
         completions: List[Dict],
@@ -603,6 +743,7 @@ class TiGTrainer:
         prompts = [item.get("prompt", []) for item in samples]
         ground_truth_actions = [item["ground_truth_action"] for item in samples]
         envs = [item.get("env", "game") for item in samples]
+        tasks = [item.get("task", "default") for item in samples]
         task_ids = [item.get("task_id", 0) for item in samples]
 
         # Generate completions for all prompts in one batch
@@ -621,6 +762,9 @@ class TiGTrainer:
 
         all_rewards = await asyncio.gather(*reward_tasks)
 
+        # Track trajectories for logging
+        batch_trajectories = []
+
         # Flatten all completions with their metadata for batched processing
         flat_completions = []  # List of (comp, advantage, sample_idx)
 
@@ -628,11 +772,40 @@ class TiGTrainer:
             zip(all_completions, ground_truth_actions)
         ):
             rewards = all_rewards[sample_idx]
+            env = envs[sample_idx]
+            task = tasks[sample_idx]
+            prompt = prompts[sample_idx]
 
             # Assign rewards to completions
             for comp, reward in zip(completions, rewards):
                 comp['reward'] = reward
                 total_reward += reward
+
+            # Update per-task reward tracker
+            self._update_task_reward_tracker(env, task, rewards)
+
+            # Save trajectory to local file (per env/task)
+            self._save_trajectory(
+                env=env,
+                task=task,
+                prompt=prompt,
+                completions=completions,
+                ground_truth_action=ground_truth_action,
+                batch_idx=batch_idx,
+                sample_idx=sample_idx
+            )
+
+            # Collect trajectory for wandb batch logging
+            batch_trajectories.append({
+                'batch_idx': batch_idx,
+                'sample_idx': sample_idx,
+                'env': env,
+                'task': task,
+                'prompt': prompt,
+                'ground_truth_action': ground_truth_action,
+                'completions': [{'response': c['response'], 'reward': c.get('reward', 0.0)} for c in completions],
+                'mean_reward': sum(c.get('reward', 0.0) for c in completions) / max(len(completions), 1),
+            })
 
             # Skip if all rewards are same (no gradient signal) - DAPO dynamic sampling
             if len(set(rewards)) <= 1:
@@ -675,6 +848,9 @@ class TiGTrainer:
                     'batch/num_skipped_samples': num_skipped_samples,
                     'batch/backprop_happened': 0,
                 })
+                # Still log per-task rewards and trajectories even when no training
+                self._log_per_task_rewards()
+                self._log_trajectories_to_wandb(batch_trajectories)
             return metrics
 
         # Ensure training mode
@@ -869,6 +1045,12 @@ class TiGTrainer:
                     'train/mean_reward': metrics['mean_reward'],
                     'train/num_completions': metrics['num_completions'],
                 }, step=self.global_step)
+
+            # Log per-task rewards
+            self._log_per_task_rewards()
+
+            # Log trajectories table to wandb
+            self._log_trajectories_to_wandb(batch_trajectories)
 
         return metrics
 
