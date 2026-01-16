@@ -319,11 +319,11 @@ class TiGTrainer:
         num_samples: Optional[int] = None
     ) -> List[List[Dict]]:
         """
-        Generate multiple completions for multiple prompts in a batched manner.
+        Generate multiple completions for multiple prompts.
 
-        This is more efficient than processing prompts one by one as it:
-        1. Batches all prompts together with padding
-        2. Generates G completions for all prompts in one batched generation
+        Processes one prompt at a time, generating all num_samples completions
+        for that prompt in a single batch. This avoids OOM by limiting batch size
+        to num_samples (e.g., 8) instead of batch_size * num_samples (e.g., 512).
 
         Args:
             prompts: List of prompts, where each prompt is a list of messages
@@ -342,69 +342,57 @@ class TiGTrainer:
         # Enable fast inference mode
         FastLanguageModel.for_inference(self.model)
 
-        # Tokenize all prompts with chat template
-        prompt_texts = [
-            self.tokenizer.apply_chat_template(
+        all_completions = []
+        num_prompts = len(prompts)
+
+        for prompt_idx, prompt in enumerate(prompts):
+            print(f"    Generating completions for prompt {prompt_idx + 1}/{num_prompts}...", end="\r")
+
+            # Tokenize single prompt with chat template
+            prompt_text = self.tokenizer.apply_chat_template(
                 prompt,
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=True
             )
-            for prompt in prompts
-        ]
 
-        # Batch tokenize with padding (left padding for generation)
-        tokenized = self.tokenizer(
-            prompt_texts,
-            return_tensors="pt",
-            padding=True,
-            add_special_tokens=False,
-        ).to(self.device)
+            tokenized = self.tokenizer(
+                prompt_text,
+                return_tensors="pt",
+                add_special_tokens=False,
+            ).to(self.device)
 
-        input_ids = tokenized.input_ids  # (batch_size, max_prompt_len)
-        attention_mask = tokenized.attention_mask  # (batch_size, max_prompt_len)
+            input_ids = tokenized.input_ids  # (1, prompt_len)
+            attention_mask = tokenized.attention_mask  # (1, prompt_len)
+            prompt_length = input_ids.shape[1]
 
-        batch_size = input_ids.shape[0]
+            # Repeat prompt num_samples times for batched generation
+            # Shape: (num_samples, prompt_len)
+            expanded_input_ids = input_ids.repeat(num_samples, 1)
+            expanded_attention_mask = attention_mask.repeat(num_samples, 1)
 
-        # Track original prompt lengths (before padding)
-        # With left padding, the actual content starts where mask becomes 1
-        prompt_lengths = attention_mask.sum(dim=1).tolist()  # List of actual prompt lengths
+            # Generate all completions for this prompt in one batch
+            outputs = self.model.generate(
+                expanded_input_ids,
+                attention_mask=expanded_attention_mask,
+                max_length=self.max_seq_length,
+                temperature=self.temperature,
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            )  # (num_samples, prompt_len + generated_len)
 
-        # Repeat each prompt num_samples times for batched generation
-        # Shape: (batch_size * num_samples, max_prompt_len)
-        expanded_input_ids = input_ids.repeat_interleave(num_samples, dim=0)
-        expanded_attention_mask = attention_mask.repeat_interleave(num_samples, dim=0)
+            # Compute log probs for all completions
+            log_probs_list = self._compute_log_probs_batched(
+                expanded_input_ids, outputs, expanded_attention_mask
+            )
 
-        # Generate all completions in one batch
-        outputs = self.model.generate(
-            expanded_input_ids,
-            attention_mask=expanded_attention_mask,
-            # max_new_tokens=self.max_new_tokens,
-            max_length=self.max_seq_length,
-            temperature=self.temperature,
-            do_sample=True,
-            pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
-        )  # (batch_size * num_samples, max_prompt_len + max_new_tokens)
-
-        # Compute log probs for all completions in a batch
-        all_log_probs = self._compute_log_probs_batched(
-            expanded_input_ids, outputs, expanded_attention_mask
-        )
-
-        # Organize results by prompt
-        all_completions = []
-        max_prompt_len = input_ids.shape[1]
-
-        for prompt_idx in range(batch_size):
+            # Build completions for this prompt
             prompt_completions = []
-            prompt_length = prompt_lengths[prompt_idx]
-
             for sample_idx in range(num_samples):
-                flat_idx = prompt_idx * num_samples + sample_idx
-                generated_ids = outputs[flat_idx]
+                generated_ids = outputs[sample_idx]
 
-                # Extract completion tokens (after the padded prompt)
-                completion_ids = generated_ids[max_prompt_len:]
+                # Extract completion tokens (after the prompt)
+                completion_ids = generated_ids[prompt_length:]
 
                 # Decode response
                 response = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
@@ -412,13 +400,17 @@ class TiGTrainer:
                 prompt_completions.append({
                     'response': response,
                     'full_tokens': generated_ids,
-                    'log_probs': all_log_probs[flat_idx],
-                    'prompt_length': max_prompt_len,  # Use padded length for consistency
+                    'log_probs': log_probs_list[sample_idx],
+                    'prompt_length': prompt_length,
                     'actual_prompt_length': prompt_length,
                 })
 
             all_completions.append(prompt_completions)
 
+            # Clear cache between prompts
+            self._clear_memory()
+
+        print()  # Clear the progress line
         return all_completions
 
     @torch.no_grad()
