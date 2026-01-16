@@ -45,6 +45,7 @@ train_micro_batch_size: 2  # Micro-batch size for training forward pass (reduce 
 # Checkpoint Settings
 checkpoint_dir: "./checkpoints/tig"
 save_steps: 100
+ref_replace_steps: 200
 keep_last_n_checkpoints: 3
 
 # WandB Settings

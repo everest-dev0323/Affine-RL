@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import asyncio
+import copy
 from datetime import datetime
 import gc
 import json
@@ -90,6 +91,7 @@ class TiGConfig:
     # Checkpoint settings
     checkpoint_dir: str
     save_steps: int
+    ref_replace_steps: int = 200  # Replace reference model every N steps
     keep_last_n_checkpoints: int
 
     # WandB settings
@@ -208,15 +210,10 @@ class TiGTrainer:
                 'trainable_params_pct': 100 * trainable_params / total_params
             })
 
-        # Load reference model (frozen)
-        print("Loading reference model...")
-        self.ref_model, _ = FastLanguageModel.from_pretrained(
-            model_name=config.model_name,
-            max_seq_length=config.max_seq_length,
-            dtype=dtype,
-            load_in_4bit=config.load_in_4bit,
-            use_gradient_checkpointing="unsloth",
-        )
+        # Create reference model as deep copy of policy model (with LoRA weights initialized to zero)
+        # This ensures ref_model has the same architecture including LoRA adapters
+        print("Creating reference model (deep copy of policy model with LoRA)...")
+        self.ref_model = copy.deepcopy(self.model)
         self.ref_model.eval()
         for param in self.ref_model.parameters():
             param.requires_grad = False
@@ -232,6 +229,7 @@ class TiGTrainer:
         self.num_generations = config.num_generations
         self.temperature = config.temperature
         self.train_micro_batch_size = getattr(config, 'train_micro_batch_size', 4)
+        self.ref_replace_steps = getattr(config, 'ref_replace_steps', 200)
 
         # Load expert dataset
         self._load_dataset()
@@ -252,6 +250,34 @@ class TiGTrainer:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _replace_reference_model(self):
+        """
+        Replace reference model with current policy model.
+
+        This updates the reference model to match the current policy,
+        which can help stabilize training by preventing the policy from
+        drifting too far from the updated reference.
+        """
+        print(f"\n{'='*60}")
+        print(f"🔄 Replacing reference model at global_step={self.global_step}")
+        print(f"{'='*60}")
+
+        # Delete old reference model to free memory
+        del self.ref_model
+        self._clear_memory()
+
+        # Create new reference model as deep copy of current policy
+        self.ref_model = copy.deepcopy(self.model)
+        self.ref_model.eval()
+        for param in self.ref_model.parameters():
+            param.requires_grad = False
+
+        print(f"✅ Reference model replaced successfully")
+        self._print_memory_stats()
+
+        if self.use_wandb:
+            wandb.log({'ref_model_replaced': self.global_step}, step=self.global_step)
 
     def _load_dataset(self):
         """
@@ -999,6 +1025,10 @@ class TiGTrainer:
                 # Save checkpoint if needed
                 if self.global_step % self.save_steps == 0:
                     self._save_checkpoint(self.global_step)
+
+                # Replace reference model if needed
+                if self.ref_replace_steps > 0 and self.global_step % self.ref_replace_steps == 0:
+                    self._replace_reference_model()
 
                 # Clear cache periodically
                 self._clear_memory()
