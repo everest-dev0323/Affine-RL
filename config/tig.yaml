@@ -3,7 +3,7 @@
 # Uses Unsloth for maximum efficiency
 
 # Model Configuration
-model_name: "Qwen/Qwen2.5-7B-Instruct"
+model_name: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 load_in_4bit: false
 load_in_8bit: false
 max_seq_length: 32768
@@ -18,7 +18,7 @@ max_data_per_task: 10000
 # LoRA Configuration
 lora_r: 16
 lora_alpha: 32
-lora_dropout: 0.05
+lora_dropout: 0.0
 # lora_target_modules: null  # Auto-detect if not specified
 
 # Unsloth Optimizations

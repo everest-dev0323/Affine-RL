@@ -1,0 +1,57 @@
+# Think in Games (TiG) Training Configuration
+# Based on "Think in Games: Learning to Reason in Games via RL with LLMs"
+# Uses Unsloth for maximum efficiency
+
+# Model Configuration
+model_name: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+load_in_4bit: false
+load_in_8bit: false
+max_seq_length: 32768
+batch_size: 2
+
+# Dataset Configuration
+# Expert dataset should be JSONL with format:
+# {"state": "...", "ground_truth_action": "action", "action_candidates": [...]}
+dataset_path: "data"
+max_data_per_task: 100
+
+# LoRA Configuration
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.0
+# lora_target_modules: null  # Auto-detect if not specified
+
+# Unsloth Optimizations
+use_gradient_checkpointing: "unsloth"
+use_rslora: false
+use_dora: false
+
+# Training Configuration
+num_epochs: 2
+learning_rate: 3.0e-6
+max_grad_norm: 1.0
+gradient_accumulation_steps: 2
+
+# TiG/GRPO Specific Parameters
+# G: Number of completions per state (paper uses 4-8)
+num_generations: 4
+max_new_tokens: 8196
+temperature: 1.0
+clip_epsilon: 0.2  # PPO clip range
+clip_epsilon_high: 0.5
+kl_coef: 0.001  # KL divergence penalty weight
+train_micro_batch_size: 2  # Micro-batch size for training forward pass (reduce if OOM)
+
+# Checkpoint Settings
+checkpoint_dir: "./checkpoints/tig"
+save_steps: 8
+keep_last_n_checkpoints: 3
+
+# WandB Settings
+use_wandb: true
+wandb_project: "tig-training"
+wandb_run_name: "tig-qwen-8b-debug"
+
+# Reproducibility
+seed: 42
+
