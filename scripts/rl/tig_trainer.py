@@ -421,8 +421,9 @@ class TiGTrainer:
                 pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
             )  # (num_samples, prompt_len + generated_len)
 
-            # Compute log probs for all completions
-            log_probs_list = self._compute_log_probs_batched(
+            # Compute log probs for all completions (both policy and reference)
+            # Precomputing ref_log_probs here avoids redundant forward passes during training
+            policy_log_probs_list, ref_log_probs_list = self._compute_log_probs_batched(
                 expanded_input_ids, outputs, expanded_attention_mask
             )
 
@@ -440,7 +441,8 @@ class TiGTrainer:
                 prompt_completions.append({
                     'response': response,
                     'full_tokens': generated_ids,
-                    'log_probs': log_probs_list[sample_idx],
+                    'log_probs': policy_log_probs_list[sample_idx],
+                    'ref_log_probs': ref_log_probs_list[sample_idx],  # Precomputed ref log probs
                     'prompt_length': prompt_length,
                     'actual_prompt_length': prompt_length,
                 })
@@ -459,9 +461,12 @@ class TiGTrainer:
         prompt_ids: torch.Tensor,
         full_ids: torch.Tensor,
         attention_mask: torch.Tensor
-    ) -> List[torch.Tensor]:
+    ) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         Compute log probabilities for completion tokens in a batched manner.
+
+        Computes log probs for both policy model and reference model to avoid
+        redundant forward passes during training (ref_model is frozen).
 
         Args:
             prompt_ids: Tokenized prompts (batch_size, prompt_len)
@@ -469,34 +474,49 @@ class TiGTrainer:
             attention_mask: Attention mask for prompts (batch_size, prompt_len)
 
         Returns:
-            List of tensors, each containing log probabilities for completion tokens
+            Tuple of (policy_log_probs, ref_log_probs), each a list of tensors
+            containing log probabilities for completion tokens
         """
         batch_size = full_ids.shape[0]
         prompt_length = prompt_ids.shape[1]
 
-        # Forward pass on full sequences
-        outputs = self.model(full_ids)
-        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+        # Forward pass on full sequences for policy model
+        policy_outputs = self.model(full_ids)
+        policy_logits = policy_outputs.logits  # (batch_size, seq_len, vocab_size)
+
+        # Forward pass on full sequences for reference model (frozen)
+        ref_outputs = self.ref_model(full_ids)
+        ref_logits = ref_outputs.logits  # (batch_size, seq_len, vocab_size)
 
         # Compute log probs for each sequence
-        all_log_probs = []
+        all_policy_log_probs = []
+        all_ref_log_probs = []
         for i in range(batch_size):
-            log_probs = []
+            policy_log_probs = []
+            ref_log_probs = []
             for j in range(prompt_length, full_ids.shape[1]):
                 token_id = full_ids[i, j]
                 # Skip padding tokens
                 if token_id == self.tokenizer.pad_token_id:
                     break
-                token_logits = logits[i, j - 1]
-                token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
-                log_probs.append(token_log_prob)
+                # Policy log prob
+                policy_token_logits = policy_logits[i, j - 1]
+                policy_log_prob = F.log_softmax(policy_token_logits, dim=-1)[token_id]
+                policy_log_probs.append(policy_log_prob)
 
-            if log_probs:
-                all_log_probs.append(torch.stack(log_probs))
+                # Reference log prob
+                ref_token_logits = ref_logits[i, j - 1]
+                ref_log_prob = F.log_softmax(ref_token_logits, dim=-1)[token_id]
+                ref_log_probs.append(ref_log_prob)
+
+            if policy_log_probs:
+                all_policy_log_probs.append(torch.stack(policy_log_probs))
+                all_ref_log_probs.append(torch.stack(ref_log_probs))
             else:
-                all_log_probs.append(torch.tensor([], device=self.device))
+                all_policy_log_probs.append(torch.tensor([], device=self.device))
+                all_ref_log_probs.append(torch.tensor([], device=self.device))
 
-        return all_log_probs
+        return all_policy_log_probs, all_ref_log_probs
 
     @torch.no_grad()
     def generate_completions(
@@ -893,6 +913,7 @@ class TiGTrainer:
             batch_tokens = []
             batch_prompt_lengths = []
             batch_old_log_probs = []
+            batch_ref_log_probs = []  # Precomputed ref log probs
             batch_advantages = []
 
             max_seq_len = max(item['comp']['full_tokens'].shape[0] for item in batch_items)
@@ -912,6 +933,7 @@ class TiGTrainer:
                 batch_tokens.append(tokens)
                 batch_prompt_lengths.append(prompt_length)
                 batch_old_log_probs.append(comp['log_probs'].detach().to(self.device))
+                batch_ref_log_probs.append(comp['ref_log_probs'].detach().to(self.device))  # Use precomputed
                 batch_advantages.append(item['advantage'])
 
             # Stack into batch tensor
@@ -920,14 +942,9 @@ class TiGTrainer:
             # Create attention mask (1 for real tokens, 0 for padding)
             attention_mask = (batch_input_ids != (self.tokenizer.pad_token_id or self.tokenizer.eos_token_id)).long()
 
-            # Batched forward pass for policy model
+            # Batched forward pass for policy model only (ref_log_probs are precomputed!)
             outputs = self.model(batch_input_ids, attention_mask=attention_mask)
             policy_logits = outputs.logits  # (batch_size, max_seq_len, vocab_size)
-
-            # Batched forward pass for reference model
-            with torch.no_grad():
-                ref_outputs = self.ref_model(batch_input_ids, attention_mask=attention_mask)
-                ref_logits = ref_outputs.logits  # (batch_size, max_seq_len, vocab_size)
 
             # Compute loss for each item in the batch
             batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
@@ -935,12 +952,12 @@ class TiGTrainer:
             for idx, item in enumerate(batch_items):
                 prompt_length = batch_prompt_lengths[idx]
                 old_log_probs = batch_old_log_probs[idx]
+                ref_log_probs = batch_ref_log_probs[idx]  # Use precomputed ref log probs
                 advantage = batch_advantages[idx]
                 tokens = batch_tokens[idx]
 
                 # Compute new log probs for completion tokens
                 new_log_probs = []
-                ref_log_probs_list = []
 
                 for j in range(prompt_length, len(tokens)):
                     token_id = tokens[j]
@@ -953,16 +970,10 @@ class TiGTrainer:
                     token_log_prob = F.log_softmax(token_logits, dim=-1)[token_id]
                     new_log_probs.append(token_log_prob)
 
-                    # Reference log prob
-                    ref_token_logits = ref_logits[idx, j - 1]
-                    ref_log_prob = F.log_softmax(ref_token_logits, dim=-1)[token_id]
-                    ref_log_probs_list.append(ref_log_prob)
-
                 if not new_log_probs:
                     continue
 
                 new_log_probs = torch.stack(new_log_probs)
-                ref_log_probs = torch.stack(ref_log_probs_list)
 
                 # Ensure shapes match with old log probs
                 min_len = min(len(new_log_probs), len(old_log_probs))
