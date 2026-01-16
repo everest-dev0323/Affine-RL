@@ -3,3 +3,6 @@ datasets
 openai
 torch
 transformers
+bitsandbytes
+wandb
+unsloth

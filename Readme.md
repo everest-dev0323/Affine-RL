@@ -70,7 +70,7 @@ results = await evaluate_env(model, "alfworld", task_ids=[1, 2, 3, 4, 5])
 ```bash
 hf download --repo-type dataset hongyu05/affine-dataset-1219 --local-dir datasets/train/all
 
-hf download --repo-type dataset hongyu05/openspiel --local-dir data/openspiel
+hf download --repo-type dataset hongyu05/affine-rl --local-dir data
 ```
 
 dataset generation
