@@ -991,8 +991,10 @@ class TiGTrainer:
                     clipped_ratio * advantage
                 ).mean()
 
-                # KL divergence
-                kl_div = (new_log_probs - ref_log_probs).mean()
+                # KL divergence (approximate, always >= 0)
+                log_ratio = new_log_probs - ref_log_probs
+                ratio = torch.exp(log_ratio)
+                kl_div = ((ratio - 1) - log_ratio).mean()
 
                 # Accumulate loss
                 item_loss = policy_loss + self.kl_coef * kl_div
