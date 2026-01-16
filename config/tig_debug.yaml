@@ -56,3 +56,7 @@ wandb_run_name: "tig-qwen-8b-debug"
 # Reproducibility
 seed: 42
 
+# Length penalty settings
+length_penalty_weight: 0.05   # Penalty weight (0 = disabled)
+length_penalty_target: 2048    # No penalty below this
+length_penalty_max: 8196      # For normalization

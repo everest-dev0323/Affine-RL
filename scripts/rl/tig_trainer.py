@@ -103,6 +103,11 @@ class TiGConfig:
     save_trajectories: bool = True
     trajectory_dir: str = "trajectories"
 
+    # Length penalty settings
+    length_penalty_weight: float = 0.0  # Set > 0 to enable length penalty
+    length_penalty_target: int = 512    # No penalty below this token count
+    length_penalty_max: int = 2048      # For normalization (typically same as max_new_tokens)
+
     # Reproducibility
     seed: int
 
@@ -230,6 +235,11 @@ class TiGTrainer:
         self.temperature = config.temperature
         self.train_micro_batch_size = getattr(config, 'train_micro_batch_size', 4)
         self.ref_replace_steps = getattr(config, 'ref_replace_steps', 200)
+
+        # Length penalty settings
+        self.length_penalty_weight = getattr(config, 'length_penalty_weight', 0.0)
+        self.length_penalty_target = getattr(config, 'length_penalty_target', 512)
+        self.length_penalty_max = getattr(config, 'length_penalty_max', 2048)
 
         # Load expert dataset
         self._load_dataset()
@@ -595,6 +605,36 @@ class TiGTrainer:
         advantages = (rewards_tensor - mean) / std
         return advantages
 
+    def compute_length_penalty(self, response: str) -> tuple[float, int]:
+        """
+        Compute normalized length penalty for a response.
+
+        Only applies penalty if completion length exceeds target_length.
+        Penalty is normalized by (max_length - target_length) to stay in [0, penalty_weight] range.
+
+        Args:
+            response: The generated response string (completion only, not prompt)
+
+        Returns:
+            Tuple of (penalty_value, num_tokens):
+                - penalty_value: Negative value to be added to reward (0 if within target)
+                - num_tokens: Number of tokens in the completion (for logging)
+        """
+        # Count completion tokens
+        num_tokens = len(self.tokenizer.encode(response, add_special_tokens=False))
+
+        # No penalty if within target length
+        if num_tokens <= self.length_penalty_target:
+            return 0.0, num_tokens
+
+        # Compute normalized excess penalty
+        excess = num_tokens - self.length_penalty_target
+        max_excess = max(self.length_penalty_max - self.length_penalty_target, 1)  # Avoid div by zero
+        normalized_excess = min(excess / max_excess, 1.0)  # Cap at 1.0
+
+        penalty = -self.length_penalty_weight * normalized_excess
+        return penalty, num_tokens
+
     def _save_trajectory(
         self,
         env: str,
@@ -727,9 +767,11 @@ class TiGTrainer:
         env: str,
         task_id: int,
         ground_truth_action: str
-    ) -> List[float]:
+    ) -> tuple[List[float], List[float], List[int]]:
         """
         Compute rewards for a list of completions using reward_response.
+
+        Includes length penalty if length_penalty_weight > 0.
 
         Args:
             completions: List of completion dicts with 'response' key
@@ -738,7 +780,10 @@ class TiGTrainer:
             ground_truth_action: Expected answer
 
         Returns:
-            List of rewards for each completion
+            Tuple of (final_rewards, length_penalties, completion_lengths):
+                - final_rewards: Base reward + length penalty for each completion
+                - length_penalties: Length penalty values (for logging)
+                - completion_lengths: Token counts (for logging)
         """
         # Create reward computation tasks for all completions
         reward_tasks = [
@@ -751,9 +796,22 @@ class TiGTrainer:
             for comp in completions
         ]
 
-        # Compute rewards in parallel
-        rewards = await asyncio.gather(*reward_tasks)
-        return list(rewards)
+        # Compute base rewards in parallel
+        base_rewards = await asyncio.gather(*reward_tasks)
+        base_rewards = list(base_rewards)
+
+        # Compute length penalties and final rewards
+        final_rewards = []
+        length_penalties = []
+        completion_lengths = []
+
+        for comp, base_reward in zip(completions, base_rewards):
+            penalty, num_tokens = self.compute_length_penalty(comp['response'])
+            final_rewards.append(base_reward + penalty)
+            length_penalties.append(penalty)
+            completion_lengths.append(num_tokens)
+
+        return final_rewards, length_penalties, completion_lengths
 
     async def train_step(self, samples: List[Dict], batch_idx: int = 0) -> Dict[str, float]:
         """
@@ -785,6 +843,10 @@ class TiGTrainer:
         kl_divs = []
         global_step_before = self.global_step  # Track if global_step changes
 
+        # Track completion lengths and length penalties for logging
+        all_completion_lengths = []
+        all_length_penalties = []
+
         # Collect all prompts and metadata for batched generation
         prompts = [item.get("prompt", []) for item in samples]
         ground_truth_actions = [item["ground_truth_action"] for item in samples]
@@ -795,7 +857,7 @@ class TiGTrainer:
         # Generate completions for all prompts in one batch
         all_completions = self.generate_completions_batched(prompts)
 
-        # Compute rewards for all completions in parallel
+        # Compute rewards for all completions in parallel (includes length penalty)
         reward_tasks = []
         for completions, env, task_id, ground_truth_action in zip(
             all_completions, envs, task_ids, ground_truth_actions
@@ -806,7 +868,7 @@ class TiGTrainer:
                 )
             )
 
-        all_rewards = await asyncio.gather(*reward_tasks)
+        all_reward_results = await asyncio.gather(*reward_tasks)
 
         # Track trajectories for logging
         batch_trajectories = []
@@ -817,10 +879,15 @@ class TiGTrainer:
         for sample_idx, (completions, ground_truth_action) in enumerate(
             zip(all_completions, ground_truth_actions)
         ):
-            rewards = all_rewards[sample_idx]
+            # Unpack rewards, length penalties, and completion lengths
+            rewards, length_penalties, completion_lengths = all_reward_results[sample_idx]
             env = envs[sample_idx]
             task = tasks[sample_idx]
             prompt = prompts[sample_idx]
+
+            # Track lengths and penalties for logging
+            all_completion_lengths.extend(completion_lengths)
+            all_length_penalties.extend(length_penalties)
 
             # Assign rewards to completions
             for comp, reward in zip(completions, rewards):
@@ -868,6 +935,10 @@ class TiGTrainer:
                     'advantage': advantages[i],
                 })
 
+        # Compute mean completion length and mean length penalty for logging
+        mean_completion_length = np.mean(all_completion_lengths) if all_completion_lengths else 0.0
+        mean_length_penalty = np.mean(all_length_penalties) if all_length_penalties else 0.0
+
         if not flat_completions:
             # No valid completions to train on
             metrics = {
@@ -875,6 +946,8 @@ class TiGTrainer:
                 'policy_loss': 0.0,
                 'kl_div': 0.0,
                 'mean_reward': total_reward / max(len(samples) * self.num_generations, 1),
+                'mean_completion_length': mean_completion_length,
+                'mean_length_penalty': mean_length_penalty,
                 'num_completions': 0,
                 'num_skipped_samples': num_skipped_samples,
                 'num_samples': len(samples),
@@ -890,6 +963,8 @@ class TiGTrainer:
                     'batch/global_step': self.global_step,
                     'batch/loss': 0.0,
                     'batch/mean_reward': metrics['mean_reward'],
+                    'batch/mean_completion_length': mean_completion_length,
+                    'batch/mean_length_penalty': mean_length_penalty,
                     'batch/num_completions': 0,
                     'batch/num_skipped_samples': num_skipped_samples,
                     'batch/backprop_happened': 0,
@@ -1055,6 +1130,8 @@ class TiGTrainer:
             'policy_loss': np.mean(policy_losses) if policy_losses else 0,
             'kl_div': np.mean(kl_divs) if kl_divs else 0,
             'mean_reward': total_reward / (len(samples) * self.num_generations),
+            'mean_completion_length': mean_completion_length,
+            'mean_length_penalty': mean_length_penalty,
             'num_completions': num_completions,
             'num_skipped_samples': num_skipped_samples,
             'num_samples': len(samples),
@@ -1075,6 +1152,8 @@ class TiGTrainer:
                 'batch/policy_loss': metrics['policy_loss'],
                 'batch/kl_div': metrics['kl_div'],
                 'batch/mean_reward': metrics['mean_reward'],
+                'batch/mean_completion_length': mean_completion_length,
+                'batch/mean_length_penalty': mean_length_penalty,
                 'batch/num_completions': num_completions,
                 'batch/num_skipped_samples': num_skipped_samples,
                 'batch/backprop_happened': 1 if global_step_delta > 0 else 0,
@@ -1086,6 +1165,8 @@ class TiGTrainer:
                     'train/policy_loss': metrics['policy_loss'],
                     'train/kl_div': metrics['kl_div'],
                     'train/mean_reward': metrics['mean_reward'],
+                    'train/mean_completion_length': mean_completion_length,
+                    'train/mean_length_penalty': mean_length_penalty,
                     'train/num_completions': metrics['num_completions'],
                 }, step=self.global_step)
 
@@ -1250,6 +1331,8 @@ async def main():
             print(f"  [{backprop_status}] global_step: {metrics['global_step']} (+{metrics['global_step_delta']})")
             print(f"  Loss: {metrics['loss']:.4f}, Reward: {metrics['mean_reward']:.4f}, "
                   f"KL: {metrics['kl_div']:.4f}")
+            print(f"  Completion length: {metrics['mean_completion_length']:.1f} tokens, "
+                  f"Length penalty: {metrics['mean_length_penalty']:.4f}")
             print(f"  Completions: {metrics['num_completions']}, "
                   f"Skipped (DAPO): {metrics['num_skipped_samples']}/{metrics['num_samples']} samples")
 
