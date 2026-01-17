@@ -349,6 +349,8 @@ async def evaluate_env(
             env_server_host=env_server_host,
         )
         results.append(result)
+        print("-"*60)
+        print(f"task id: {task_id}, score: {result['score']}")
 
     # Calculate average score
     avg_score = sum(r["score"] for r in results) / len(results) if results else 0.0
@@ -396,8 +398,6 @@ async def reward_response(env: str, task_id: int, response: str, ground_truth: s
 
 def parse_response(text: str) -> str:
     """Parse response, removing <think> tags if present"""
-    if "<think>" in text:
-        if "</think>" not in text:
-            return ""
+    if "</think>" in text:
         text = text.split("</think>")[-1].strip()
     return text.strip()
