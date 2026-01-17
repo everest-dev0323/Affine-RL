@@ -1079,6 +1079,7 @@ class TiGTrainer:
 
                 # KL divergence (approximate, always >= 0)
                 log_ratio = new_log_probs - ref_log_probs
+                log_ratio = torch.clamp(log_ratio, -10, 10)
                 ratio = torch.exp(log_ratio)
                 kl_div = ((ratio - 1) - log_ratio).mean()
 
