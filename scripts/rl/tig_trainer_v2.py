@@ -128,6 +128,7 @@ class TiGTrainer:
         self.gradient_accumulation_steps = config.gradient_accumulation_steps
 
         self.max_seq_length = config.max_seq_length
+        self.max_grad_norm = config.max_grad_norm
 
         # Checkpoint settings
         self.checkpoint_dir = Path(config.checkpoint_dir)
@@ -693,23 +694,36 @@ class TiGTrainer:
     #     with open(trajectory_file, 'a', encoding='utf-8') as f:
     #         f.write(json.dumps(trajectory_record, ensure_ascii=False) + '\n')
 
-    # def _log_per_task_rewards(self):
-    #     """
-    #     Log average rewards per env/task to wandb.
-    #     """
-    #     if not self.use_wandb or not self.task_reward_tracker:
-    #         return
+    def _log_per_task_rewards(self):
+        """
+        Log average rewards per env/task to wandb and print to CLI.
+        """
+        if not self.task_reward_tracker:
+            return
 
-    #     task_reward_log = {}
-    #     for (env, task), rewards in self.task_reward_tracker.items():
-    #         if rewards:
-    #             avg_reward = sum(rewards) / len(rewards)
-    #             # Use hierarchical naming: reward/{env}/{task}
-    #             task_reward_log[f'reward/{env}/{task}'] = avg_reward
-    #             task_reward_log[f'reward/{env}/{task}_count'] = len(rewards)
+        task_reward_log = {}
+        cli_lines = []
 
-    #     if task_reward_log:
-    #         wandb.log(task_reward_log, step=self.global_step)
+        for (env, task), rewards in self.task_reward_tracker.items():
+            if rewards:
+                # Get the most recent reward (from this step)
+                latest_reward = rewards[-1]
+                avg_reward = sum(rewards) / len(rewards)
+                # Use hierarchical naming: reward/{env}/{task}
+                task_reward_log[f'reward/{env}/{task}'] = latest_reward
+                task_reward_log[f'reward/{env}/{task}_avg'] = avg_reward
+                # CLI output
+                cli_lines.append(f"    {env}/{task}: {latest_reward:.3f} (avg: {avg_reward:.3f})")
+
+        # Print to CLI
+        if cli_lines:
+            print("  Per-task rewards:")
+            for line in cli_lines:
+                print(line)
+
+        # Log to wandb
+        if self.use_wandb and task_reward_log:
+            wandb.log(task_reward_log, step=self.global_step)
 
     def _log_trajectories_to_wandb(self, trajectories: List[Dict]):
         """
@@ -1016,8 +1030,8 @@ class TiGTrainer:
                 'backprop_happened': 1 if backprop_happened else 0,
             }, step=self.global_step)
 
-            # Log per-task rewards
-            # self._log_per_task_rewards()
+        # Log per-task rewards (to wandb and CLI)
+        self._log_per_task_rewards()
 
         return metrics
 
