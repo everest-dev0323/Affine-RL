@@ -375,8 +375,8 @@ async def reward_response(env: str, task_id: int, response: str, ground_truth: s
         Reward score (1.0 for correct, 0.0 for incorrect)
     """
     env_lower = env.lower()
+    parsed_response = parse_response(response)
     
-
     if env_lower == "lgc-v2":
         # Use LogicTaskV2's evaluate method with verifier
         # logic_task_v2 module is in sys.path (added at top of file)
@@ -388,10 +388,9 @@ async def reward_response(env: str, task_id: int, response: str, ground_truth: s
         challenge = await logic_task.generate_dataset_by_id(task_id)
 
         # Use the evaluate method which handles verifier logic
-        return await logic_task.evaluate(response, challenge)
+        return await logic_task.evaluate(parsed_response, challenge)
 
     else:
-        parsed_response = parse_response(response)
         # Simple equality check for game and print environments
         return 1.0 if parsed_response.strip() == ground_truth.strip() else 0.0
     
