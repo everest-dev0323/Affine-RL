@@ -1176,7 +1176,7 @@ async def main():
 
             # Detailed logging
             backprop_status = "✓ BACKPROP" if metrics['backprop_happened'] else "✗ NO BACKPROP"
-            print(f"  [{backprop_status}] global_step: {metrics['global_step']} (+{metrics['global_step_delta']})")
+            print(f"  [{backprop_status}] global_step: {metrics['global_step']}")
             print(f"  Loss: {metrics['loss']:.4f}, Reward: {metrics['mean_reward']:.4f}, "
                   f"KL: {metrics['kl_div']:.4f}")
             print(f"  Completions: {metrics['num_completions']}, "
