@@ -521,6 +521,9 @@ class TiGTrainer:
         Computes log probs for both policy model and reference model to avoid
         redundant forward passes during training (ref_model is frozen).
 
+        Memory optimization: Process each model separately and clear cache between
+        forward passes to avoid holding both sets of logits in memory simultaneously.
+
         Args:
             prompt_length: Length of the prompt (same for all sequences in batch)
             full_ids: Full sequences including completions (batch_size, full_len)
@@ -530,33 +533,39 @@ class TiGTrainer:
             containing log probabilities for completion tokens
         """
         batch_size = full_ids.shape[0]
-
-        # Forward pass on full sequences for policy model
-        policy_outputs = self.model(full_ids)
-        policy_logits = policy_outputs.logits  # (batch_size, seq_len, vocab_size)
-
-        # Forward pass on full sequences for reference model (frozen)
-        ref_outputs = self.ref_model(full_ids)
-        ref_logits = ref_outputs.logits  # (batch_size, seq_len, vocab_size)
-
-        # Vectorized log prob computation for completion tokens
-        # logits at position j-1 predict token at position j
-        completion_logits_policy = policy_logits[:, prompt_length - 1:-1, :]  # (batch_size, completion_len, vocab_size)
-        completion_logits_ref = ref_logits[:, prompt_length - 1:-1, :]  # (batch_size, completion_len, vocab_size)
         completion_tokens = full_ids[:, prompt_length:]  # (batch_size, completion_len)
+        pad_token_id = self.tokenizer.pad_token_id
 
-        # Compute log softmax
-        policy_log_probs_all = F.log_softmax(completion_logits_policy, dim=-1)  # (batch_size, completion_len, vocab_size)
-        ref_log_probs_all = F.log_softmax(completion_logits_ref, dim=-1)  # (batch_size, completion_len, vocab_size)
-
+        # --- Policy model forward pass ---
+        policy_logits = self.model(full_ids).logits  # (batch_size, seq_len, vocab_size)
+        # Compute log softmax for completion tokens immediately
+        policy_log_probs_all = F.log_softmax(
+            policy_logits[:, prompt_length - 1:-1, :], dim=-1
+        )  # (batch_size, completion_len, vocab_size)
         # Gather log probs for actual tokens
-        policy_log_probs_gathered = policy_log_probs_all.gather(-1, completion_tokens.unsqueeze(-1)).squeeze(-1)  # (batch_size, completion_len)
-        ref_log_probs_gathered = ref_log_probs_all.gather(-1, completion_tokens.unsqueeze(-1)).squeeze(-1)  # (batch_size, completion_len)
+        policy_log_probs_gathered = policy_log_probs_all.gather(
+            -1, completion_tokens.unsqueeze(-1)
+        ).squeeze(-1)  # (batch_size, completion_len)
+        # Free policy logits memory before ref model forward pass
+        del policy_logits, policy_log_probs_all
+        self._clear_memory()
+
+        # --- Reference model forward pass ---
+        ref_logits = self.ref_model(full_ids).logits  # (batch_size, seq_len, vocab_size)
+        # Compute log softmax for completion tokens immediately
+        ref_log_probs_all = F.log_softmax(
+            ref_logits[:, prompt_length - 1:-1, :], dim=-1
+        )  # (batch_size, completion_len, vocab_size)
+        # Gather log probs for actual tokens
+        ref_log_probs_gathered = ref_log_probs_all.gather(
+            -1, completion_tokens.unsqueeze(-1)
+        ).squeeze(-1)  # (batch_size, completion_len)
+        # Free ref logits memory
+        del ref_logits, ref_log_probs_all
 
         # Split into list and handle padding
         all_policy_log_probs = []
         all_ref_log_probs = []
-        pad_token_id = self.tokenizer.pad_token_id
 
         for i in range(batch_size):
             # Find actual completion length (exclude padding)
