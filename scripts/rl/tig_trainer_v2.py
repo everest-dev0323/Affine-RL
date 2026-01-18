@@ -586,28 +586,6 @@ class TiGTrainer:
         return all_policy_log_probs, all_ref_log_probs
 
     @torch.no_grad()
-    def generate_completions(
-        self,
-        prompt: list,
-        num_samples: Optional[int] = None
-    ) -> List[Dict]:
-        """
-        Generate multiple completions for a given state using Unsloth.
-
-        Note: For better efficiency with multiple prompts, use generate_completions_batched().
-
-        Args:
-            prompt: list of messages
-            num_samples: Number of completions to generate
-
-        Returns:
-            List of dicts with 'response', 'full_tokens', 'log_probs', 'prompt_length' keys
-        """
-        # Delegate to batched version with single prompt
-        results = self.generate_completions_batched([prompt], num_samples)
-        return results[0] if results else []
-
-    @torch.no_grad()
     def _compute_log_probs_for_completion(
         self,
         prompt_ids: torch.Tensor,
@@ -928,7 +906,7 @@ class TiGTrainer:
             comp = item['comp']
             advantage = item['advantage']
 
-            tokens = comp['full_tokens'].to(self.device)
+            tokens = comp['full_tokens'].clone().to(self.device)  # Clone to convert inference tensor to normal tensor
             prompt_length = comp['prompt_length']
             old_log_probs = comp['log_probs'].detach().to(self.device)
             ref_log_probs = comp['ref_log_probs'].detach().to(self.device)
