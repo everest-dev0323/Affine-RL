@@ -234,6 +234,8 @@ def main():
         per_device_eval_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
+        lr_scheduler_type = "linear",
+        weight_decay = 0.001,
         warmup_ratio=config.warmup_ratio,
         max_grad_norm=config.max_grad_norm,
         bf16=config.bf16,
