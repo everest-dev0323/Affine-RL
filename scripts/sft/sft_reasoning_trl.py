@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 import torch
 import yaml
 from datasets import Dataset
-from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
+from transformers import DataCollatorForLanguageModeling , Trainer, TrainingArguments
 from unsloth import FastLanguageModel
 
 
@@ -91,7 +91,7 @@ def load_and_tokenize_data(data_dir: str, tokenizer, max_seq_length: int) -> Dat
             for line in f:
                 if line.strip():
                     traj = json.loads(line)
-                    conv = traj.get("conversation", [])
+                    conv = traj.get("conversation", []) or traj.get("extra").get("conversation")
                     if conv:
                         samples.append(conv)
 
@@ -106,31 +106,33 @@ def load_and_tokenize_data(data_dir: str, tokenizer, max_seq_length: int) -> Dat
         for idx, msg in enumerate(conversation):
             if msg['role'] == 'assistant':
                 input_ids = tokenizer.apply_chat_template(
-                    conversation[:idx],
+                    conversation[:idx + 1],
                     tokenize=True,
                     add_generation_prompt=False,
-                    enable_thinking=False,
                 )
                 
                 labels = input_ids
                 
                 prompt_len = len(tokenizer.apply_chat_template(
-                    conversation[:idx -1],
+                    conversation[:idx],
                     tokenize=True,
                     add_generation_prompt=True,
                 ))
                 
                 # Update labels
                 labels = [-100] * prompt_len + labels[prompt_len:]
+                attention_mask = [1] * len(input_ids)
 
                 # Truncate if needed
                 if len(input_ids) > max_seq_length:
                     input_ids = input_ids[:max_seq_length]
                     labels = labels[:max_seq_length]
+                    attention_mask = attention_mask[:max_seq_length]
                     
                 samples.append({
                     "input_ids": input_ids,
                     "labels": labels,
+                    "attention_mask": attention_mask
                 })
 
         return samples
@@ -211,7 +213,7 @@ def main():
 
     # Data collator for pre-tokenized data
     # Pads input_ids and labels, handles -100 masking correctly
-    collator = DataCollatorForSeq2Seq(
+    collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         padding=True,
         pad_to_multiple_of=8,  # Efficient for tensor cores
