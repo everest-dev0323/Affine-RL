@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 import torch
 import yaml
 from datasets import Dataset
-from transformers import DataCollatorForLanguageModeling , Trainer, TrainingArguments
+from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
 from unsloth import FastLanguageModel
 
 
@@ -91,7 +91,7 @@ def load_and_tokenize_data(data_dir: str, tokenizer, max_seq_length: int) -> Dat
             for line in f:
                 if line.strip():
                     traj = json.loads(line)
-                    conv = traj.get("conversation", []) or traj.get("extra").get("conversation")
+                    conv = traj.get("conversation", []) or (traj.get("extra") or {}).get("conversation", [])
                     if conv:
                         samples.append(conv)
 
@@ -111,7 +111,7 @@ def load_and_tokenize_data(data_dir: str, tokenizer, max_seq_length: int) -> Dat
                     add_generation_prompt=False,
                 )
                 
-                labels = input_ids
+                labels = list(input_ids)
                 
                 prompt_len = len(tokenizer.apply_chat_template(
                     conversation[:idx],
@@ -213,7 +213,7 @@ def main():
 
     # Data collator for pre-tokenized data
     # Pads input_ids and labels, handles -100 masking correctly
-    collator = DataCollatorForLanguageModeling(
+    collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
         padding=True,
         pad_to_multiple_of=8,  # Efficient for tensor cores
