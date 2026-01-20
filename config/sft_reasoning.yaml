@@ -1,0 +1,49 @@
+# SFT Reasoning Training Configuration
+# For fine-tuning on multi-turn conversations with reasoning content
+# Uses Unsloth + LoRA for efficient training with KL-divergence penalty
+
+# Model Configuration
+model_name: "Qwen/Qwen3-14B"
+load_in_4bit: false  # Use full precision (bf16) for best quality
+load_in_8bit: false
+max_seq_length: 8192
+
+# Dataset Configuration
+# JSONL files with conversation format including reasoning_content
+dataset_path: "data_reasoning"
+train_split: 0.95  # 95% train, 5% validation
+
+# LoRA Configuration (larger rank for 14B model)
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+# lora_target_modules: null  # Auto-detect if not specified
+
+# Unsloth Optimizations
+use_gradient_checkpointing: "unsloth"
+use_rslora: true  # Rank-stabilized LoRA
+use_dora: false
+
+# Training Configuration
+num_epochs: 3
+learning_rate: 2.0e-5
+max_grad_norm: 1.0
+batch_size: 1
+gradient_accumulation_steps: 8  # Effective batch size = 8
+
+# KL-divergence penalty (prevents overfitting)
+kl_coef: 0.1
+
+# Checkpoint Settings
+checkpoint_dir: "./checkpoints/sft_reasoning"
+save_steps: 200
+keep_last_n_checkpoints: 3
+
+# WandB Settings
+use_wandb: true
+wandb_project: "SFT-Reasoning"
+wandb_run_name: "sft-reasoning-14b"
+
+# Reproducibility
+seed: 42
+
