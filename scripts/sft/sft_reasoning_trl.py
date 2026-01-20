@@ -11,14 +11,18 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
+import os
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
 import yaml
 from datasets import Dataset
+from tqdm import tqdm
 from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
 from unsloth import FastLanguageModel
 
@@ -74,79 +78,146 @@ def load_config(config_path: Optional[str] = None) -> TrainingConfig:
     return config
 
 
-def load_and_tokenize_data(data_dir: str, tokenizer, max_seq_length: int) -> Dataset:
+def get_cache_path(data_dir: str, model_name: str, max_seq_length: int) -> Path:
+    """Generate a cache path based on data directory and model settings."""
+    # Create a hash of the config to detect changes
+    config_str = f"{data_dir}_{model_name}_{max_seq_length}"
+    config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+    cache_dir = Path(data_dir) / ".cache"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / f"tokenized_{config_hash}"
+
+
+def tokenize_single_conversation(conversation: List[Dict], tokenizer, max_seq_length: int) -> List[Dict]:
+    """Tokenize a single conversation and create labels with masking."""
+    samples = []
+
+    for idx, msg in enumerate(conversation):
+        if msg['role'] == 'assistant':
+            input_ids = tokenizer.apply_chat_template(
+                conversation[:idx + 1],
+                tokenize=True,
+                add_generation_prompt=False,
+            )
+
+            labels = list(input_ids)
+
+            prompt_len = len(tokenizer.apply_chat_template(
+                conversation[:idx],
+                tokenize=True,
+                add_generation_prompt=True,
+            ))
+
+            # Update labels
+            labels = [-100] * prompt_len + labels[prompt_len:]
+            attention_mask = [1] * len(input_ids)
+
+            # Truncate if needed
+            if len(input_ids) > max_seq_length:
+                input_ids = input_ids[:max_seq_length]
+                labels = labels[:max_seq_length]
+                attention_mask = attention_mask[:max_seq_length]
+
+            samples.append({
+                "input_ids": input_ids,
+                "labels": labels,
+                "attention_mask": attention_mask
+            })
+
+    return samples
+
+
+def load_and_tokenize_data(
+    data_dir: str,
+    tokenizer,
+    max_seq_length: int,
+    model_name: str = "",
+    num_proc: int = None,
+    use_cache: bool = True,
+) -> Dataset:
     """
-    Load JSONL conversation files and tokenize them.
+    Load JSONL conversation files and tokenize them with multiprocessing.
 
     Creates input_ids and labels with proper masking:
     - labels = -100 for system/user messages (not trained on)
     - labels = token_id for assistant messages (trained on)
-    """
-    data_path = Path(data_dir)
-    samples = []
 
-    for jsonl_file in data_path.rglob("*.jsonl"):
-        print(f"Loading {jsonl_file}")
+    Args:
+        data_dir: Directory containing JSONL files
+        tokenizer: Tokenizer to use
+        max_seq_length: Maximum sequence length
+        model_name: Model name (for cache key)
+        num_proc: Number of processes for parallel tokenization (default: cpu_count - 1)
+        use_cache: Whether to cache tokenized data to disk
+    """
+    # Check for cached dataset
+    cache_path = get_cache_path(data_dir, model_name, max_seq_length)
+    if use_cache and cache_path.exists():
+        print(f"Loading cached tokenized dataset from {cache_path}")
+        return Dataset.load_from_disk(str(cache_path))
+
+    # Set default num_proc
+    if num_proc is None:
+        num_proc = max(1, os.cpu_count() - 1)
+
+    data_path = Path(data_dir)
+    conversations = []
+
+    # Load all conversations
+    print("Loading JSONL files...")
+    jsonl_files = list(data_path.rglob("*.jsonl"))
+    for jsonl_file in tqdm(jsonl_files, desc="Loading files"):
         with open(jsonl_file) as f:
             for line in f:
                 if line.strip():
                     traj = json.loads(line)
                     conv = traj.get("conversation", []) or (traj.get("extra") or {}).get("conversation", [])
                     if conv:
-                        samples.append(conv)
+                        conversations.append({"conversation": conv})
 
-    print(f"Loaded {len(samples)} conversations")
+    print(f"Loaded {len(conversations)} conversations")
 
-    # Tokenize with label masking
-    def tokenize_conversation(conversation: List[Dict]) -> List[Dict]:
-        """Tokenize a conversation and create labels with masking."""
-        
-        samples = []
+    # Create dataset for parallel processing
+    raw_dataset = Dataset.from_list(conversations)
 
-        for idx, msg in enumerate(conversation):
-            if msg['role'] == 'assistant':
-                input_ids = tokenizer.apply_chat_template(
-                    conversation[:idx + 1],
-                    tokenize=True,
-                    add_generation_prompt=False,
-                )
-                
-                labels = list(input_ids)
-                
-                prompt_len = len(tokenizer.apply_chat_template(
-                    conversation[:idx],
-                    tokenize=True,
-                    add_generation_prompt=True,
-                ))
-                
-                # Update labels
-                labels = [-100] * prompt_len + labels[prompt_len:]
-                attention_mask = [1] * len(input_ids)
+    # Tokenize in parallel using datasets.map()
+    def tokenize_batch(examples):
+        """Process a batch of conversations."""
+        all_input_ids = []
+        all_labels = []
+        all_attention_masks = []
 
-                # Truncate if needed
-                if len(input_ids) > max_seq_length:
-                    input_ids = input_ids[:max_seq_length]
-                    labels = labels[:max_seq_length]
-                    attention_mask = attention_mask[:max_seq_length]
-                    
-                samples.append({
-                    "input_ids": input_ids,
-                    "labels": labels,
-                    "attention_mask": attention_mask
-                })
+        for conv in examples["conversation"]:
+            samples = tokenize_single_conversation(conv, tokenizer, max_seq_length)
+            for sample in samples:
+                all_input_ids.append(sample["input_ids"])
+                all_labels.append(sample["labels"])
+                all_attention_masks.append(sample["attention_mask"])
 
-        return samples
+        return {
+            "input_ids": all_input_ids,
+            "labels": all_labels,
+            "attention_mask": all_attention_masks,
+        }
 
-    # Process all conversations
-    tokenized_samples = []
-    for conv in samples:
-        tokenized_subsamples = tokenize_conversation(conv)
-        if len(tokenized_subsamples) > 0:
-            tokenized_samples.extend(tokenized_subsamples)
+    print(f"Tokenizing with {num_proc} processes...")
+    tokenized_dataset = raw_dataset.map(
+        tokenize_batch,
+        batched=True,
+        batch_size=100,  # Process 100 conversations at a time per worker
+        num_proc=num_proc,
+        remove_columns=["conversation"],
+        desc="Tokenizing",
+    )
 
-    print(f"Tokenized {len(tokenized_samples)} samples")
+    print(f"Tokenized {len(tokenized_dataset)} samples")
 
-    return Dataset.from_list(tokenized_samples)
+    # Cache to disk for future runs
+    if use_cache:
+        print(f"Caching tokenized dataset to {cache_path}")
+        tokenized_dataset.save_to_disk(str(cache_path))
+
+    return tokenized_dataset
 
 
 def main():
@@ -201,8 +272,14 @@ def main():
         use_gradient_checkpointing="unsloth" if config.gradient_checkpointing else False,
     )
 
-    # Load JSONL files and tokenize
-    dataset = load_and_tokenize_data(config.data_dir, tokenizer, config.max_seq_length)
+    # Load JSONL files and tokenize (with caching and multiprocessing)
+    dataset = load_and_tokenize_data(
+        data_dir=config.data_dir,
+        tokenizer=tokenizer,
+        max_seq_length=config.max_seq_length,
+        model_name=config.model_name,
+        use_cache=True,
+    )
 
     # Split into train/eval
     split = dataset.train_test_split(test_size=0.05, seed=42)
