@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-SFT Reasoning Trainer using HuggingFace Trainer.
+SFT Reasoning Trainer using TRL SFTTrainer with Packing.
 
-Loads JSONL conversation files, tokenizes them with proper label masking,
-and trains with standard Trainer.
+Loads JSONL conversation files and trains with SFTTrainer.
+Uses packing for efficient training (up to 2-3x speedup).
 
 Usage:
     python scripts/sft/sft_reasoning_trl.py --config config/sft_reasoning_trl.yaml
@@ -11,20 +11,19 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import os
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import yaml
 from datasets import Dataset
 from tqdm import tqdm
-from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
+from trl import SFTTrainer, SFTConfig
 from unsloth import FastLanguageModel
+from unsloth.chat_templates import train_on_responses_only
 
 
 @dataclass
@@ -78,90 +77,58 @@ def load_config(config_path: Optional[str] = None) -> TrainingConfig:
     return config
 
 
-def get_cache_path(data_dir: str, model_name: str, max_seq_length: int) -> Path:
-    """Generate a cache path based on data directory and model settings."""
-    # Create a hash of the config to detect changes
-    config_str = f"{data_dir}_{model_name}_{max_seq_length}"
-    config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
-    cache_dir = Path(data_dir) / ".cache"
-    cache_dir.mkdir(exist_ok=True)
-    return cache_dir / f"tokenized_{config_hash}"
+def extract_sub_conversations(conversation: list) -> list:
+    """
+    Extract sub-conversations from a multi-turn conversation.
 
+    For a conversation with N assistant messages, creates N sub-conversations,
+    each ending at one assistant response. This ensures:
+    1. Each assistant's reasoning content is properly preserved
+    2. The model learns from ALL assistant turns, not just the last one
 
-def tokenize_single_conversation(conversation: List[Dict], tokenizer, max_seq_length: int) -> List[Dict]:
-    """Tokenize a single conversation and create labels with masking."""
-    samples = []
+    Example:
+        Input: [user1, assistant1, user2, assistant2, user3, assistant3]
+        Output: [
+            [user1, assistant1],                                    # Train on assistant1
+            [user1, assistant1, user2, assistant2],                 # Train on assistant2
+            [user1, assistant1, user2, assistant2, user3, assistant3]  # Train on assistant3
+        ]
+
+    Args:
+        conversation: Full multi-turn conversation
+
+    Returns:
+        List of sub-conversations, each ending at an assistant message
+    """
+    sub_conversations = []
 
     for idx, msg in enumerate(conversation):
-        if msg['role'] == 'assistant':
-            input_ids = tokenizer.apply_chat_template(
-                conversation[:idx + 1],
-                tokenize=True,
-                add_generation_prompt=False,
-            )
+        if msg.get('role') == 'assistant':
+            # Create sub-conversation up to and including this assistant message
+            sub_conv = conversation[:idx + 1]
+            sub_conversations.append(sub_conv)
 
-            labels = list(input_ids)
-
-            prompt_len = len(tokenizer.apply_chat_template(
-                conversation[:idx],
-                tokenize=True,
-                add_generation_prompt=True,
-            ))
-
-            # Update labels
-            labels = [-100] * prompt_len + labels[prompt_len:]
-            attention_mask = [1] * len(input_ids)
-
-            # Truncate if needed
-            if len(input_ids) > max_seq_length:
-                input_ids = input_ids[:max_seq_length]
-                labels = labels[:max_seq_length]
-                attention_mask = attention_mask[:max_seq_length]
-
-            samples.append({
-                "input_ids": input_ids,
-                "labels": labels,
-                "attention_mask": attention_mask
-            })
-
-    return samples
+    return sub_conversations
 
 
-def load_and_tokenize_data(
-    data_dir: str,
-    tokenizer,
-    max_seq_length: int,
-    model_name: str = "",
-    num_proc: int = None,
-    use_cache: bool = True,
-) -> Dataset:
+def load_conversations_for_sft(data_dir: str) -> Dataset:
     """
-    Load JSONL conversation files and tokenize them with multiprocessing.
+    Load JSONL conversation files for SFTTrainer.
 
-    Creates input_ids and labels with proper masking:
-    - labels = -100 for system/user messages (not trained on)
-    - labels = token_id for assistant messages (trained on)
+    For multi-turn conversations with multiple assistant messages (each with reasoning),
+    we extract sub-conversations to ensure each assistant turn is trained on properly.
+
+    SFTTrainer expects a dataset with 'messages' field containing conversations
+    in the standard chat format: [{"role": "user/assistant/system", "content": "..."}]
 
     Args:
         data_dir: Directory containing JSONL files
-        tokenizer: Tokenizer to use
-        max_seq_length: Maximum sequence length
-        model_name: Model name (for cache key)
-        num_proc: Number of processes for parallel tokenization (default: cpu_count - 1)
-        use_cache: Whether to cache tokenized data to disk
+
+    Returns:
+        Dataset with 'messages' field for each sub-conversation
     """
-    # Check for cached dataset
-    cache_path = get_cache_path(data_dir, model_name, max_seq_length)
-    if use_cache and cache_path.exists():
-        print(f"Loading cached tokenized dataset from {cache_path}")
-        return Dataset.load_from_disk(str(cache_path))
-
-    # Set default num_proc
-    if num_proc is None:
-        num_proc = max(1, os.cpu_count() - 1)
-
     data_path = Path(data_dir)
-    conversations = []
+    samples = []
 
     # Load all conversations
     print("Loading JSONL files...")
@@ -173,51 +140,14 @@ def load_and_tokenize_data(
                     traj = json.loads(line)
                     conv = traj.get("conversation", []) or (traj.get("extra") or {}).get("conversation", [])
                     if conv:
-                        conversations.append({"conversation": conv})
+                        # Extract sub-conversations for each assistant turn
+                        sub_convs = extract_sub_conversations(conv)
+                        for sub_conv in sub_convs:
+                            # SFTTrainer expects 'messages' field
+                            samples.append({"messages": sub_conv})
 
-    print(f"Loaded {len(conversations)} conversations")
-
-    # Create dataset for parallel processing
-    raw_dataset = Dataset.from_list(conversations)
-
-    # Tokenize in parallel using datasets.map()
-    def tokenize_batch(examples):
-        """Process a batch of conversations."""
-        all_input_ids = []
-        all_labels = []
-        all_attention_masks = []
-
-        for conv in examples["conversation"]:
-            samples = tokenize_single_conversation(conv, tokenizer, max_seq_length)
-            for sample in samples:
-                all_input_ids.append(sample["input_ids"])
-                all_labels.append(sample["labels"])
-                all_attention_masks.append(sample["attention_mask"])
-
-        return {
-            "input_ids": all_input_ids,
-            "labels": all_labels,
-            "attention_mask": all_attention_masks,
-        }
-
-    print(f"Tokenizing with {num_proc} processes...")
-    tokenized_dataset = raw_dataset.map(
-        tokenize_batch,
-        batched=True,
-        batch_size=100,  # Process 100 conversations at a time per worker
-        num_proc=num_proc,
-        remove_columns=["conversation"],
-        desc="Tokenizing",
-    )
-
-    print(f"Tokenized {len(tokenized_dataset)} samples")
-
-    # Cache to disk for future runs
-    if use_cache:
-        print(f"Caching tokenized dataset to {cache_path}")
-        tokenized_dataset.save_to_disk(str(cache_path))
-
-    return tokenized_dataset
+    print(f"Loaded {len(samples)} training samples from conversations")
+    return Dataset.from_list(samples)
 
 
 def main():
@@ -272,13 +202,9 @@ def main():
         use_gradient_checkpointing="unsloth" if config.gradient_checkpointing else False,
     )
 
-    # Load JSONL files and tokenize (with caching and multiprocessing)
-    dataset = load_and_tokenize_data(
+    # Load conversations for SFTTrainer (expects 'messages' field or 'text' field)
+    dataset = load_conversations_for_sft(
         data_dir=config.data_dir,
-        tokenizer=tokenizer,
-        max_seq_length=config.max_seq_length,
-        model_name=config.model_name,
-        use_cache=True,
     )
 
     # Split into train/eval
@@ -288,17 +214,14 @@ def main():
 
     print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
-    # Data collator for pre-tokenized data
-    # Pads input_ids and labels, handles -100 masking correctly
-    collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        padding=True,
-        pad_to_multiple_of=8,  # Efficient for tensor cores
-    )
-
-    # Training arguments
-    training_args = TrainingArguments(
+    # SFTConfig with packing enabled for faster training
+    # Packing combines multiple sequences into one to reduce padding waste
+    training_args = SFTConfig(
         output_dir=config.output_dir,
+        # Packing settings (key for speedup!)
+        packing=True,  # Enable packing for 2-3x speedup
+        max_seq_length=config.max_seq_length,
+        # Training settings
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
         per_device_eval_batch_size=config.per_device_train_batch_size,
@@ -307,6 +230,7 @@ def main():
         warmup_ratio=config.warmup_ratio,
         max_grad_norm=config.max_grad_norm,
         bf16=config.bf16,
+        # Logging
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
         eval_steps=config.eval_steps,
@@ -316,20 +240,27 @@ def main():
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         report_to="wandb" if config.use_wandb else "none",
-        remove_unused_columns=False,  # Keep input_ids and labels
         dataloader_pin_memory=True,
+        # Dataset settings
+        dataset_text_field=None,  # We use 'messages' format
+        dataset_num_proc=max(1, os.cpu_count() - 1),  # Parallel tokenization
     )
 
-    # Create trainer
-    trainer = Trainer(
+    # Create SFTTrainer with packing
+    trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=collator,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
 
+    qwen_kwargs = dict(instruction_part = "<|im_start|>", response_part = "<|im_start|>assistant\n<think>\n",)
+    trainer = train_on_responses_only(
+        trainer,
+        **qwen_kwargs,
+    )
+    
     # Train!
     print("Starting training...")
     trainer.train()
