@@ -21,9 +21,9 @@ import torch
 import yaml
 from datasets import Dataset
 from tqdm import tqdm
-from trl import SFTTrainer, SFTConfig
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
+from trl import SFTTrainer, SFTConfig
 
 
 @dataclass
@@ -206,9 +206,14 @@ def main():
     dataset = load_conversations_for_sft(
         data_dir=config.data_dir,
     )
+    
+    reasoning_conversations = tokenizer.apply_chat_template(
+        list(dataset["messages"]),
+        tokenize = False,
+    )
 
     # Split into train/eval
-    split = dataset.train_test_split(test_size=0.05, seed=42)
+    split = Dataset.from_dict({"text": reasoning_conversations}).train_test_split(test_size=0.05, seed=42)
     train_dataset = split["train"]
     eval_dataset = split["test"]
 
@@ -220,7 +225,9 @@ def main():
         output_dir=config.output_dir,
         # Packing settings (key for speedup!)
         packing=True,  # Enable packing for 2-3x speedup
-        max_seq_length=config.max_seq_length,
+        optim="adamw_8bit",
+        # Use the tokenizer's actual eos_token (don't let TRL guess)
+        eos_token=tokenizer.eos_token,
         # Training settings
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
@@ -242,7 +249,7 @@ def main():
         report_to="wandb" if config.use_wandb else "none",
         dataloader_pin_memory=True,
         # Dataset settings
-        dataset_text_field=None,  # We use 'messages' format
+        dataset_text_field="text", 
         dataset_num_proc=max(1, os.cpu_count() - 1),  # Parallel tokenization
     )
 
