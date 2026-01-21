@@ -8,6 +8,9 @@ Uses packing for efficient training (up to 2-3x speedup).
 Usage:
     python scripts/sft/sft_reasoning_trl.py --config config/sft_reasoning_trl.yaml
     python scripts/sft/sft_reasoning_trl.py --data_dir data_reasoning/openspiel --output_dir outputs/sft_trl
+    python scripts/sft/sft_reasoning_trl.py \
+    --config config/sft_reasoning_trl.yaml \
+    --resume_from_checkpoint outputs/sft_reasoning_trl/checkpoint-3000
 """
 
 import argparse
@@ -75,6 +78,54 @@ def load_config(config_path: Optional[str] = None) -> TrainingConfig:
             if hasattr(config, key):
                 setattr(config, key, value)
     return config
+
+
+def filter_nan_text_rows(model, dataset, tokenizer, text_column="text", max_length=8192, device="cuda"):
+    """
+    Filter out rows that cause NaN in model outputs.
+
+    Args:
+        model: The model to test with
+        dataset: Dataset to filter
+        tokenizer: Tokenizer for the model
+        text_column: Column name containing text
+        max_length: Maximum sequence length for tokenization
+        device: Device to run inference on
+
+    Returns:
+        List of valid dataset rows (can be converted back to Dataset)
+    """
+    model.eval()
+    valid_dataset = []
+
+    print(f"Scanning for NaN-causing rows in column: '{text_column}'...")
+
+    for i in tqdm(range(len(dataset)), desc="Filtering NaN rows"):
+        raw_text = dataset[i][text_column]
+
+        # Tokenize the row
+        inputs = tokenizer(
+            raw_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length
+        ).to(device)
+
+        # Test for NaN
+        with torch.no_grad():
+            try:
+                outputs = model(**inputs)
+                logits = outputs.logits
+
+                if not torch.isnan(logits).any():
+                    valid_dataset.append(dataset[i])
+                else:
+                    print(f"\nRow {i} triggered NaN. Preview: {raw_text[:100]}...")
+            except Exception as e:
+                print(f"\nRow {i} caused an error: {e}")
+
+    print(f"Filtered: {len(dataset)} -> {len(valid_dataset)} rows ({len(dataset) - len(valid_dataset)} removed)")
+    return valid_dataset
 
 
 def extract_sub_conversations(conversation: list) -> list:
@@ -156,6 +207,8 @@ def main():
     parser.add_argument("--data_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--model_name", type=str, default=None)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="Path to LoRA checkpoint directory to resume training from")
     args = parser.parse_args()
 
     # Load config
@@ -178,29 +231,44 @@ def main():
             config=vars(config),
         )
 
+    # Check if resuming from checkpoint
+    resume_from_checkpoint = args.resume_from_checkpoint
+
     # Load model with Unsloth for efficiency
-    print(f"Loading model: {config.model_name}")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=config.model_name,
-        max_seq_length=config.max_seq_length,
-        load_in_4bit=config.load_in_4bit,
-        dtype=torch.bfloat16 if config.bf16 else torch.float16,
-    )
+    if resume_from_checkpoint:
+        # Resume from LoRA checkpoint - load the adapter
+        print(f"Resuming from checkpoint: {resume_from_checkpoint}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=resume_from_checkpoint,  # Load from checkpoint (has adapter_config.json)
+            max_seq_length=config.max_seq_length,
+            load_in_4bit=config.load_in_4bit,
+            dtype=torch.bfloat16 if config.bf16 else torch.float16,
+        )
+    else:
+        # Fresh training - load base model
+        print(f"Loading model: {config.model_name}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=config.model_name,
+            max_seq_length=config.max_seq_length,
+            load_in_4bit=config.load_in_4bit,
+            dtype=torch.bfloat16 if config.bf16 else torch.float16,
+        )
 
     # Use left padding for LLM training (consistent with inference)
     tokenizer.padding_side = "right"
 
-    # Add LoRA adapters
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=config.lora_r,
-        lora_alpha=config.lora_alpha,
-        lora_dropout=config.lora_dropout,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                       "gate_proj", "up_proj", "down_proj"],
-        bias="none",
-        use_gradient_checkpointing="unsloth" if config.gradient_checkpointing else False,
-    )
+    # Add LoRA adapters only if not resuming (checkpoint already has adapters)
+    if not resume_from_checkpoint:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=config.lora_r,
+            lora_alpha=config.lora_alpha,
+            lora_dropout=config.lora_dropout,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                           "gate_proj", "up_proj", "down_proj"],
+            bias="none",
+            use_gradient_checkpointing="unsloth" if config.gradient_checkpointing else False,
+        )
 
     # Load conversations for SFTTrainer (expects 'messages' field or 'text' field)
     dataset = load_conversations_for_sft(
@@ -218,6 +286,19 @@ def main():
     eval_dataset = split["test"]
 
     print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+
+    # Filter out NaN-causing rows from eval dataset
+    print("Filtering eval dataset for NaN-causing rows...")
+    valid_eval_rows = filter_nan_text_rows(
+        model=model,
+        dataset=eval_dataset,
+        tokenizer=tokenizer,
+        text_column="text",
+        max_length=config.max_seq_length,
+        device="cuda",
+    )
+    eval_dataset = Dataset.from_list(valid_eval_rows)
+    print(f"Eval dataset after filtering: {len(eval_dataset)}")
 
     # SFTConfig with packing enabled for faster training
     # Packing combines multiple sequences into one to reduce padding waste
@@ -272,7 +353,7 @@ def main():
     
     # Train!
     print("Starting training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Save final model
     print(f"Saving model to {config.output_dir}")
