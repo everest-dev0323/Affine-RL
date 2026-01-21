@@ -188,7 +188,7 @@ def main():
     )
 
     # Use left padding for LLM training (consistent with inference)
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
 
     # Add LoRA adapters
     model = FastLanguageModel.get_peft_model(
@@ -224,7 +224,7 @@ def main():
     training_args = SFTConfig(
         output_dir=config.output_dir,
         # Packing settings (key for speedup!)
-        packing=True,  # Enable packing for 2-3x speedup
+        packing=False,  # Enable packing for 2-3x speedup
         optim="adamw_8bit",
         # Use the tokenizer's actual eos_token (don't let TRL guess)
         eos_token=tokenizer.eos_token,
@@ -252,7 +252,7 @@ def main():
         dataloader_pin_memory=True,
         # Dataset settings
         dataset_text_field="text", 
-        dataset_num_proc=max(1, os.cpu_count() - 1),  # Parallel tokenization
+        dataset_num_proc=8,  # Parallel tokenization
     )
 
     # Create SFTTrainer with packing
