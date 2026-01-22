@@ -209,6 +209,8 @@ def main():
     parser.add_argument("--model_name", type=str, default=None)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
                         help="Path to LoRA checkpoint directory to resume training from")
+    parser.add_argument("--ignore_data_skip", action="store_true",
+                        help="When resuming, don't skip data already seen (restart data from beginning)")
     args = parser.parse_args()
 
     # Load config
@@ -353,6 +355,17 @@ def main():
     
     # Train!
     print("Starting training...")
+    if resume_from_checkpoint:
+        # Delete optimizer/scheduler state files so trainer uses fresh LR from config
+        opt_path = Path(resume_from_checkpoint) / "optimizer.pt"
+        sched_path = Path(resume_from_checkpoint) / "scheduler.pt"
+        if opt_path.exists():
+            print(f"Removing {opt_path} to use fresh learning rate from config")
+            opt_path.unlink()
+        if sched_path.exists():
+            print(f"Removing {sched_path} to use fresh scheduler from config")
+            sched_path.unlink()
+
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Save final model
