@@ -1,0 +1,29 @@
+# Accelerate config for TRL GRPOTrainer with vLLM colocate mode + DeepSpeed ZeRO-3
+# 
+# Usage:
+#   accelerate launch --config_file config/accelerate_deepspeed_zero3.yaml \
+#       scripts/rl/tig_trainer_vllm.py --config config/tig.yaml
+#
+# Note: For vLLM colocate mode, each GPU runs its own vLLM engine instance
+# in sync (SPMD pattern). DeepSpeed ZeRO-3 handles model weight sharding.
+
+compute_environment: LOCAL_MACHINE
+debug: false
+deepspeed_config:
+  deepspeed_config_file: config/deepspeed_zero3.json
+  zero3_init_flag: true
+distributed_type: DEEPSPEED
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8  # Adjust to number of GPUs
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+

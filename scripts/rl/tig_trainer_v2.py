@@ -147,13 +147,6 @@ class TiGTrainer:
             )
             print(f"WandB initialized: {wandb.run.name}")
 
-        # Trajectory saving settings
-        self.save_trajectories = getattr(config, 'save_trajectories', True)
-        self.trajectory_dir = Path(getattr(config, 'trajectory_dir', 'trajectories'))
-        if self.save_trajectories:
-            self.trajectory_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Trajectory directory: {self.trajectory_dir}")
-
         # Per-task reward tracking: {(env, task): [rewards]}
         self.task_reward_tracker: Dict[tuple, List[float]] = {}
 

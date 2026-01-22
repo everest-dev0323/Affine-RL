@@ -60,3 +60,11 @@ seed: 42
 length_penalty_weight: 0.05   # Penalty weight (0 = disabled)
 length_penalty_target: 2048    # No penalty below this
 length_penalty_max: 8196      # For normalization
+
+# vLLM Colocate Mode Settings (for multi-GPU training)
+# Memory utilization: lower values (0.3-0.5) when training+inference share GPU
+vllm_gpu_memory_utilization: 0.5
+# Tensor parallelism: keep 1 for small models, increase for large (70B+) models
+# - TP=1: Pure data parallelism (recommended for 8B models)
+# - TP=2+: Shards model across GPUs (better for very large models)
+vllm_tensor_parallel_size: 1
