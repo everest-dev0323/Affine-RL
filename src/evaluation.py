@@ -387,6 +387,26 @@ async def reward_response(env: str, task_id: int, response: str, ground_truth: s
         # Generate challenge to get task metadata (task_type and game_data)
         challenge = await logic_task.generate_dataset_by_id(task_id)
 
+        if challenge.extra.get("task_type") == "sudoku":
+            # First check if it's a perfect solution
+            score = await logic_task.evaluate(parsed_response, challenge)
+            if score:
+                return 1.0  # Perfect solution
+
+            # Not perfect - calculate granular reward
+            # Extract answer from response
+            answer_str = extract_sudoku_answer(parsed_response)
+
+            # Parse answer and puzzle grids
+            answer_grid = parse_sudoku_grid(answer_str)
+            puzzle_str = challenge.extra.get("metadata", {}).get("puzzle", "")
+            puzzle_grid = parse_sudoku_grid(puzzle_str)
+
+            if answer_grid is None or puzzle_grid is None:
+                return 0.0  # Cannot parse grids
+
+            return sudoku_reward(answer_grid, puzzle_grid)
+
         # Use the evaluate method which handles verifier logic
         return await logic_task.evaluate(parsed_response, challenge)
 
@@ -400,3 +420,139 @@ def parse_response(text: str) -> str:
     if "</think>" in text:
         text = text.split("</think>")[-1].strip()
     return text.strip()
+
+
+def sudoku_reward(answer_grid: list, puzzle_grid: list) -> float:
+    """
+    Calculate reward for a sudoku answer based on validity checks.
+
+    Args:
+        answer_grid: 9x9 grid of integers (the model's answer)
+        puzzle_grid: 9x9 grid with original puzzle (0 for empty cells)
+
+    Returns:
+        float: Reward between 0 and 1
+            - 0 if doesn't respect original puzzle
+            - Otherwise based on row/col/box validity
+    """
+    # Check if answer respects original puzzle (pre-filled cells must match)
+    for i in range(9):
+        for j in range(9):
+            if puzzle_grid[i][j] != 0:
+                if answer_grid[i][j] != puzzle_grid[i][j]:
+                    return 0.0  # Violates original puzzle
+
+    def is_valid_group(group: list) -> bool:
+        """Check if a group contains exactly 1-9 with no duplicates"""
+        return sorted(group) == list(range(1, 10))
+
+    # Count valid rows
+    valid_rows = sum(1 for row in answer_grid if is_valid_group(row))
+    row_score = valid_rows / 9
+
+    # Count valid columns
+    valid_cols = 0
+    for j in range(9):
+        col = [answer_grid[i][j] for i in range(9)]
+        if is_valid_group(col):
+            valid_cols += 1
+    col_score = valid_cols / 9
+
+    # Count valid 3x3 boxes
+    valid_boxes = 0
+    for box_row in range(3):
+        for box_col in range(3):
+            box = []
+            for i in range(3):
+                for j in range(3):
+                    box.append(answer_grid[box_row * 3 + i][box_col * 3 + j])
+            if is_valid_group(box):
+                valid_boxes += 1
+    box_score = valid_boxes / 9
+
+    # Final reward: average of row, col, box validity scores
+    return (3*row_score + 3*col_score + 4*box_score) / 10
+
+
+def extract_sudoku_answer(response: str) -> str:
+    """
+    Extract the sudoku grid from model response.
+
+    Looks for ```...``` block containing the grid, or 9 lines of 9 digits.
+
+    Args:
+        response: Model's response text
+
+    Returns:
+        Extracted grid string
+    """
+    import re
+
+    # First try: find 9 lines of 9 digits anywhere in the response
+    lines = response.strip().split('\n')
+    grid_lines = []
+    for line in lines:
+        # Remove backticks and other common formatting
+        clean_line = line.replace('`', '').strip()
+        # Extract digits from line
+        digits = re.findall(r'[1-9]', clean_line)
+        if len(digits) == 9:
+            grid_lines.append(''.join(digits))
+
+    if len(grid_lines) >= 9:
+        return '\n'.join(grid_lines[:9])
+
+    # Fallback: try to find code block
+    pattern = r"```([\s\S]*?)```"
+    matches = re.findall(pattern, response)
+
+    if matches:
+        # Get the last code block
+        grid_str = matches[-1].strip()
+        # Remove language identifier if present
+        if grid_str and '\n' in grid_str:
+            first_line = grid_str.split('\n')[0]
+            if not re.search(r'[1-9]', first_line):
+                grid_str = '\n'.join(grid_str.split('\n')[1:])
+        return grid_str
+
+    return response.strip()
+
+
+def parse_sudoku_grid(grid_str: str) -> list:
+    """
+    Parse grid string into 9x9 list of integers.
+
+    Args:
+        grid_str: String representation of grid
+
+    Returns:
+        9x9 list of integers, or None if invalid
+    """
+    if not grid_str:
+        return None
+
+    lines = grid_str.strip().split('\n')
+    grid = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Extract digits (1-9) and dots/zeros
+        row = []
+        for char in line:
+            if char.isdigit():
+                row.append(int(char))
+            elif char == '.':
+                row.append(0)
+            # Skip other characters (spaces, separators, etc.)
+
+        if len(row) == 9:
+            grid.append(row)
+
+    if len(grid) != 9:
+        return None
+
+    return grid
