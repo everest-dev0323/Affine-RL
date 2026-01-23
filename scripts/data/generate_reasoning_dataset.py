@@ -12,6 +12,8 @@ Supports:
 - Streaming writes to output files
 
 python scripts/data/generate_reasoning_dataset.py --file openspiel/goofspiel.jsonl --workers 10 --max_items 455
+
+python scripts/data/generate_reasoning_dataset.py --file openspiel/goofspiel.jsonl --workers 10 --winner_only
 """
 
 import os
@@ -32,20 +34,20 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
 
 
-REASONING_SYSTEM_PROMPT = """You are solving a problem. Given a conversation history and the correct answer, generate brief internal reasoning that leads to that answer.
+REASONING_SYSTEM_PROMPT = """You are solving a problem. Given a conversation history and the correct answer, generate strategic reasoning that leads to that answer.
 
-Write CONCISE thinking in FIRST PERSON. Keep it SHORT (2-5 sentences). Do NOT:
+Write thinking in FIRST PERSON. Keep it MODERATE length (4-8 sentences). Do NOT:
 - Say "the expert chose" or "the answer is"
 - Reference that you already know the answer
-- Write lengthy analysis or enumerate all possibilities
-- Repeat information from the problem
+- Repeat the full game state or problem description
 
 DO:
-- Identify the key insight quickly
-- State your reasoning briefly
-- Arrive at the answer naturally
+- Consider what the opponent might do and why
+- Analyze the strategic tradeoffs between options
+- Explain the key insight that makes this move strong
+- Arrive at the answer through logical deduction
 
-Output ONLY brief thinking wrapped in <think> tags. No final answer."""
+Output ONLY the thinking wrapped in <think> tags. No final answer."""
 
 
 async def call_deepseek_api(
@@ -77,10 +79,10 @@ async def call_deepseek_api(
     )
     response.raise_for_status()
     result = response.json()
-    return result["choices"][0]["message"]["content"]
+    return result["choices"][0]["message"]["content"] # , result["choices"][0]["message"].get("reasoning_content", "")
 
 
-def build_reasoning_prompt(conversation: List[Dict[str, str]], assistant_idx: int) -> List[Dict[str, str]]:
+def build_reasoning_prompt(conversation: List[Dict[str, str]], assistant_idx: int, game_name: str, player_id: int) -> List[Dict[str, str]]:
     """Build prompt for generating reasoning for a specific assistant turn."""
     # Get context up to and including the assistant response
     context = conversation[:assistant_idx + 1]
@@ -103,8 +105,30 @@ def build_reasoning_prompt(conversation: List[Dict[str, str]], assistant_idx: in
             else:
                 conv_text += f"[Your Previuos Choice]\n{content}\n\n"
     
+    if game_name == 'clobber':
+        if player_id:
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 1. (black pieces, 'x')"
+        else:
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 0. (white pieces, 'o')"
+    elif game_name == 'hex':
+        if player_id: 
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 1. (Blue 'o')"
+        else:
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 0. (Red 'x')"
+        
+        system_prompt = system_prompt + """
+NOTE: The Hex board indentation is purely visual. Column positions (a, b, c, d, e) are always counted from the LEFT of each row, ignoring the leading spaces. 
+Example: In row "  . x . . .", the 'x' is at column b (2nd position), not column c."""
+    elif game_name == 'othello':
+        if player_id:
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 1. (White, 'o')"
+        else:
+            system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 0. (Black, 'x')"
+    else:
+        system_prompt = REASONING_SYSTEM_PROMPT
+        
     return [
-        {"role": "system", "content": REASONING_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Here is the conversation with the correct answer. Generate realistic first-person thinking that leads to this answer:\n\n{conv_text}"},
     ]
 
@@ -121,11 +145,13 @@ async def process_single_item(
         try:
             conversation = item.get("conversation", [])
             new_conversation = []
+            game_name = item.get('game_name')
+            player_id = item.get('player_id')
             
             for i, msg in enumerate(conversation):
                 if msg.get("role") == "assistant":
                     # Generate reasoning for this assistant turn
-                    prompt = build_reasoning_prompt(conversation, i)
+                    prompt = build_reasoning_prompt(conversation, i, game_name, player_id)
                     reasoning = await call_deepseek_api(
                         client, prompt, api_key, model
                     )
@@ -170,10 +196,18 @@ async def process_file(
     model: str,
     max_workers: int,
     max_items: int = None,
+    winner_only: bool = False,
 ) -> int:
     """Process a single JSONL file and generate reasoning."""
     # Load data
     data = load_jsonl(input_file)
+
+    # Filter to winner rollouts only if requested
+    if winner_only:
+        original_count = len(data)
+        data = [item for item in data if item.get("success", False)]
+        print(f"  Filtered to winners: {len(data)}/{original_count} items")
+
     if max_items:
         data = data[:max_items]
 
@@ -279,6 +313,7 @@ async def main_async(args):
             args.model,
             args.workers,
             args.max_items,
+            args.winner_only,
         )
         total_items += count
 
@@ -302,6 +337,8 @@ def main():
                         help='Number of parallel API calls')
     parser.add_argument('--max_items', type=int, default=None,
                         help='Maximum items to process per file')
+    parser.add_argument('--winner_only', action='store_true',
+                        help='Only process rollouts where success is true')
     args = parser.parse_args()
 
     asyncio.run(main_async(args))
