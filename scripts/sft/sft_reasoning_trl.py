@@ -162,7 +162,7 @@ def extract_sub_conversations(conversation: list) -> list:
     return sub_conversations
 
 
-def load_conversations_for_sft(data_dir: str) -> Dataset:
+def load_conversations_for_sft(data_dir: str, max_samples_per_file: int = 5000) -> Dataset:
     """
     Load JSONL conversation files for SFTTrainer.
 
@@ -174,6 +174,7 @@ def load_conversations_for_sft(data_dir: str) -> Dataset:
 
     Args:
         data_dir: Directory containing JSONL files
+        max_samples_per_file: Maximum number of messages to load from each file (default: 5000)
 
     Returns:
         Dataset with 'messages' field for each sub-conversation
@@ -185,8 +186,11 @@ def load_conversations_for_sft(data_dir: str) -> Dataset:
     print("Loading JSONL files...")
     jsonl_files = list(data_path.rglob("*.jsonl"))
     for jsonl_file in tqdm(jsonl_files, desc="Loading files"):
+        file_samples = []
         with open(jsonl_file) as f:
             for line in f:
+                if len(file_samples) >= max_samples_per_file:
+                    break
                 if line.strip():
                     traj = json.loads(line)
                     conv = traj.get("conversation", []) or (traj.get("extra") or {}).get("conversation", [])
@@ -195,7 +199,10 @@ def load_conversations_for_sft(data_dir: str) -> Dataset:
                         sub_convs = extract_sub_conversations(conv)
                         for sub_conv in sub_convs:
                             # SFTTrainer expects 'messages' field
-                            samples.append({"messages": sub_conv})
+                            file_samples.append({"messages": sub_conv})
+
+        print(f"  Loaded {len(file_samples)} samples from {jsonl_file.name}")
+        samples.extend(file_samples)
 
     print(f"Loaded {len(samples)} training samples from conversations")
     return Dataset.from_list(samples)
