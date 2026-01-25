@@ -155,6 +155,9 @@ def extract_sub_conversations(conversation: list) -> list:
 
     for idx, msg in enumerate(conversation):
         if msg.get('role') == 'assistant':
+            # Ensure assistant message has reasoning_content (default to empty string)
+            if 'reasoning_content' not in msg:
+                msg['reasoning_content'] = ""
             # Create sub-conversation up to and including this assistant message
             sub_conv = conversation[:idx + 1]
             sub_conversations.append(sub_conv)

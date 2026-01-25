@@ -30,8 +30,10 @@ from dotenv import load_dotenv
 
 
 # DeepSeek API configuration
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEFAULT_MODEL = "deepseek-chat"
+# DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+API_URL = "https://api.openai.com/v1/chat/completions"
+# DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "gpt-5.2"
 
 
 REASONING_SYSTEM_PROMPT = """You are solving a problem. Given a conversation history and the correct answer, generate strategic reasoning that leads to that answer.
@@ -55,8 +57,8 @@ async def call_deepseek_api(
     messages: List[Dict[str, str]],
     api_key: str,
     model: str = DEFAULT_MODEL,
-    temperature: float = 0.7,
-    max_tokens: int = 4096,
+    # temperature: float = 0.7,
+    # max_tokens: int = 4096,
 ) -> str:
     """Call DeepSeek API and return the reasoning content."""
     headers = {
@@ -67,12 +69,12 @@ async def call_deepseek_api(
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        # "temperature": temperature,
+        # "max_tokens": max_tokens,
     }
     
     response = await client.post(
-        DEEPSEEK_API_URL,
+        API_URL,
         headers=headers,
         json=payload,
         timeout=120.0,
@@ -111,14 +113,23 @@ def build_reasoning_prompt(conversation: List[Dict[str, str]], assistant_idx: in
         else:
             system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 0. (white pieces, 'o')"
     elif game_name == 'hex':
-        if player_id: 
+        if player_id:
             system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 1. (Blue 'o')"
         else:
             system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 0. (Red 'x')"
-        
+
         system_prompt = system_prompt + """
-NOTE: The Hex board indentation is purely visual. Column positions (a, b, c, d, e) are always counted from the LEFT of each row, ignoring the leading spaces. 
-Example: In row "  . x . . .", the 'x' is at column b (2nd position), not column c."""
+NOTE: The Hex board indentation is purely visual. Column positions (a, b, c, d, e) are always counted from the LEFT of each row, ignoring the leading spaces.
+Example: In row "  . x . . .", the 'x' is at column b (2nd position), not column c.
+
+BOARD ORIENTATION: The board is displayed as a diamond rotated 45 degrees.
+- TOP edge of display = Top-Left side (Red's connection side)
+- BOTTOM edge of display = Bottom-Right side (Red's connection side)
+- LEFT edge of display = Bottom-Left side (Blue's connection side)
+- RIGHT edge of display = Top-Right side (Blue's connection side)
+
+Red (x) wins by connecting TOP edge to BOTTOM edge.
+Blue (o) wins by connecting LEFT edge to RIGHT edge."""
     elif game_name == 'othello':
         if player_id:
             system_prompt = REASONING_SYSTEM_PROMPT + "\nNOTE: You are player 1. (White, 'o')"
@@ -128,7 +139,7 @@ Example: In row "  . x . . .", the 'x' is at column b (2nd position), not column
         system_prompt = REASONING_SYSTEM_PROMPT
         
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "developer", "content": system_prompt},
         {"role": "user", "content": f"Here is the conversation with the correct answer. Generate realistic first-person thinking that leads to this answer:\n\n{conv_text}"},
     ]
 
@@ -264,9 +275,9 @@ async def process_file(
 
 async def main_async(args):
     """Async main function."""
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("Error: DEEPSEEK_API_KEY environment variable not set")
+        print("Error: OPENAI_API_KEY environment variable not set")
         sys.exit(1)
 
     # Create output directory
@@ -332,7 +343,7 @@ def main():
     parser.add_argument('--file', type=str, default=None,
                         help='Specific file to process (relative to input_dir)')
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL,
-                        help='DeepSeek model name')
+                        help='OpenAI model name')
     parser.add_argument('--workers', type=int, default=10,
                         help='Number of parallel API calls')
     parser.add_argument('--max_items', type=int, default=None,
