@@ -1,3 +1,6 @@
 [submodule "AffineFoundation/affinetes"]
 	path = AffineFoundation/affinetes
 	url = https://github.com/Bambuuai/affinetes.git
+[submodule "external/katahex"]
+	path = external/katahex
+	url = https://github.com/Bambuuai/katahex.git
