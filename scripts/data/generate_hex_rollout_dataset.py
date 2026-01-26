@@ -14,6 +14,9 @@ SGF Format Notes:
 - SZ[N]: Board size (5, 7, 9, 11)
 - RE[B+] or RE[W+]: Game result
 - Moves: B[coord] or W[coord] where coord is like "a1", "k11"
+
+
+python scripts/data/generate_hex_rollout_dataset.py --workers 20
 """
 
 import os
@@ -116,6 +119,21 @@ def parse_sgf_game(sgf_line: str) -> dict:
         'result': result,
         'game_hash': game_hash,
     }
+
+
+def load_processed_hashes(output_file: str) -> set:
+    """Load game hashes that have already been processed."""
+    processed = set()
+    if os.path.exists(output_file):
+        with open(output_file, 'r') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    if 'game_hash' in data:
+                        processed.add(data['game_hash'])
+                except:
+                    pass
+    return processed
 
 
 def load_sgf_files(rollout_dir: str) -> list:
@@ -363,6 +381,17 @@ def generate_dataset(
 
     if len(games) == 0:
         print("No games found!")
+        return 0
+
+    # Filter out already processed games
+    processed_hashes = load_processed_hashes(output_file)
+    if processed_hashes:
+        print(f"Already processed: {len(processed_hashes)} games")
+        games = [g for g in games if g.get('game_hash') not in processed_hashes]
+        print(f"New games to process: {len(games)}")
+
+    if len(games) == 0:
+        print("No new games to process!")
         return 0
 
     # Limit games if needed (each game produces 2 trajectories)
