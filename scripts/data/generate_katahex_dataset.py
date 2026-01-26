@@ -395,7 +395,7 @@ def main():
                         help='JSONL file with task_id and seed pairs')
     parser.add_argument('--max_visits', type=int, default=500,
                         help='KataHex MCTS visits per move')
-    parser.add_argument('--output_file', type=str, default='data/openspiel/hex_katahex_dataset.jsonl',
+    parser.add_argument('--output_file', type=str, default='data/openspiel/hex_golden.jsonl',
                         help='Output file path')
     parser.add_argument('--katahex_path', type=str,
                         default='external/katahex/build/katahex',
@@ -410,17 +410,47 @@ def main():
                         help='Limit number of tasks to process')
     args = parser.parse_args()
 
-    # Read task_id and seed pairs from file
+    # Hex task_id range
+    HEX_TASK_ID_MIN = 600_000_000
+    HEX_TASK_ID_MAX = 699_999_999
+
+    # Load existing task_ids from output file to skip already processed tasks
+    existing_task_ids = set()
+    if os.path.exists(args.output_file):
+        with open(args.output_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    data = json.loads(line)
+                    existing_task_ids.add(data['task_id'])
+        print(f"Loaded {len(existing_task_ids)} existing task_ids from {args.output_file}")
+
+    # Read task_id and seed pairs from file, filtering for hex tasks only
     task_ids = []
     seeds = []
+    skipped_non_hex = 0
+    skipped_existing = 0
 
     with open(args.tasks_file, 'r') as f:
         for line in f:
             line = line.strip()
             if line:
                 data = json.loads(line)
-                task_ids.append(data['task_id'])
+                task_id = data['task_id']
+                # Filter: only include hex task_ids (600_000_000 ~ 699_999_999)
+                if not (HEX_TASK_ID_MIN <= task_id <= HEX_TASK_ID_MAX):
+                    skipped_non_hex += 1
+                    continue
+                # Skip already processed task_ids
+                if task_id in existing_task_ids:
+                    skipped_existing += 1
+                    continue
+                task_ids.append(task_id)
                 seeds.append(data['seed'])
+
+    print(f"Filtered {skipped_non_hex} non-hex tasks")
+    print(f"Skipped {skipped_existing} already processed tasks")
+    print(f"Remaining {len(task_ids)} new hex tasks to process")
 
     if args.limit:
         task_ids = task_ids[:args.limit]
@@ -428,10 +458,6 @@ def main():
 
     # Create output directory
     os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
-
-    # Clear output file if exists
-    if os.path.exists(args.output_file):
-        os.remove(args.output_file)
 
     print(f"KataHex Dataset Generation")
     print(f"=" * 50)
