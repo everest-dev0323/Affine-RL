@@ -383,7 +383,7 @@ def generate_dataset(
 
     os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
 
-    with open(output_file, 'w') as f:
+    with open(output_file, 'a') as f:
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_single_game, arg): arg for arg in args_list}
 
