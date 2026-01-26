@@ -391,8 +391,8 @@ def generate_trajectories_batch(
 
 def main():
     parser = argparse.ArgumentParser(description='Generate Hex dataset using KataHex')
-    parser.add_argument('--tasks_file', type=str, default='data/openspiel/hex_tasks.jsonl',
-                        help='JSONL file with task_id and seed pairs')
+    parser.add_argument('--merged_file', type=str, default='data/merged.json',
+                        help='JSON file with merged evaluation data')
     parser.add_argument('--max_visits', type=int, default=500,
                         help='KataHex MCTS visits per move')
     parser.add_argument('--output_file', type=str, default='data/openspiel/hex_golden.jsonl',
@@ -408,11 +408,13 @@ def main():
                         help='Path to config file')
     parser.add_argument('--limit', type=int, default=None,
                         help='Limit number of tasks to process')
+    parser.add_argument('--latest_n', type=int, default=200,
+                        help='Number of latest tasks to collect per env')
     args = parser.parse_args()
 
-    # Hex task_id range
-    HEX_TASK_ID_MIN = 600_000_000
-    HEX_TASK_ID_MAX = 699_999_999
+    # Import get_sampling_list
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
+    from src.data import get_sampling_list
 
     # Load existing task_ids from output file to skip already processed tasks
     existing_task_ids = set()
@@ -425,30 +427,30 @@ def main():
                     existing_task_ids.add(data['task_id'])
         print(f"Loaded {len(existing_task_ids)} existing task_ids from {args.output_file}")
 
-    # Read task_id and seed pairs from file, filtering for hex tasks only
+    # Load merged.json and get sampling list
+    with open(args.merged_file, 'r') as f:
+        merged_data = json.load(f)
+
+    sampling_list = get_sampling_list(merged_data, latest_n=args.latest_n)
+
+    # Get hex tasks from sampling list
+    hex_tasks = sampling_list.get('GAME', {}).get('hex', [])
+
+    # Filter out already processed tasks
     task_ids = []
     seeds = []
-    skipped_non_hex = 0
     skipped_existing = 0
 
-    with open(args.tasks_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                data = json.loads(line)
-                task_id = data['task_id']
-                # Filter: only include hex task_ids (600_000_000 ~ 699_999_999)
-                if not (HEX_TASK_ID_MIN <= task_id <= HEX_TASK_ID_MAX):
-                    skipped_non_hex += 1
-                    continue
-                # Skip already processed task_ids
-                if task_id in existing_task_ids:
-                    skipped_existing += 1
-                    continue
-                task_ids.append(task_id)
-                seeds.append(data['seed'])
+    for task in hex_tasks:
+        task_id = task['task_id']
+        seed = task['seed']
+        if task_id in existing_task_ids:
+            skipped_existing += 1
+            continue
+        task_ids.append(task_id)
+        seeds.append(seed)
 
-    print(f"Filtered {skipped_non_hex} non-hex tasks")
+    print(f"Found {len(hex_tasks)} hex tasks in merged.json")
     print(f"Skipped {skipped_existing} already processed tasks")
     print(f"Remaining {len(task_ids)} new hex tasks to process")
 
@@ -456,12 +458,16 @@ def main():
         task_ids = task_ids[:args.limit]
         seeds = seeds[:args.limit]
 
+    if len(task_ids) == 0:
+        print("No tasks to process. Exiting.")
+        return
+
     # Create output directory
     os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
 
-    print(f"KataHex Dataset Generation")
+    print(f"\nKataHex Dataset Generation")
     print(f"=" * 50)
-    print(f"Tasks file: {args.tasks_file}")
+    print(f"Merged file: {args.merged_file}")
     print(f"Number of tasks: {len(task_ids)}")
     print(f"Max visits: {args.max_visits}")
     print(f"Output file: {args.output_file}")

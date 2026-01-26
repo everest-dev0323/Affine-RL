@@ -106,3 +106,72 @@ def load_jsonl(path):
     with open(path, "r") as f:
         return [json.loads(line) for line in f if line.strip()]
 
+
+def get_sampling_list(data: list, latest_n: int = 200) -> dict:
+    """
+    Extract sampling list from merged.json data.
+
+    Args:
+        data: List of dictionaries from merged.json
+        latest_n: Number of latest tasks to collect per env (default: 200)
+
+    Returns:
+        Dictionary structure:
+        {
+            'game': {
+                'othello': [{'task_id': ..., 'seed': ...}, ...],
+                'hex': [{'task_id': ..., 'seed': ...}, ...],
+                ...
+            },
+            'lgc-v2': {
+                'task_type': [{'task_id': ..., 'seed': ...}, ...],
+                ...
+            },
+            'print': {
+                'default': [{'task_id': ..., 'seed': ...}, ...],
+            },
+            ...
+        }
+    """
+    from collections import defaultdict
+
+    # First, group all items by env (preserving order for "latest" logic)
+    env_items = defaultdict(list)
+    for item in data:
+        env = item.get('env')
+        if env:
+            env_items[env].append(item)
+
+    result = {}
+
+    for env, items in env_items.items():
+        # Take only the latest N items per env
+        latest_items = items[:latest_n]
+
+        # Group by task_type within this env
+        task_type_dict = defaultdict(list)
+
+        for item in latest_items:
+            extra = item.get('extra', {})
+            request = extra.get('request', {})
+
+            task_id = request.get('task_id')
+            seed = request.get('seed')
+
+            # Skip if no task_id or seed
+            if task_id is None or seed is None:
+                continue
+
+            # Get task_type (print env doesn't have task_type)
+            task_type = extra.get('task_type', 'default')
+
+            task_type_dict[task_type].append({
+                'task_id': task_id,
+                'seed': seed
+            })
+
+        if task_type_dict:
+            result[env] = dict(task_type_dict)
+
+    return result
+
