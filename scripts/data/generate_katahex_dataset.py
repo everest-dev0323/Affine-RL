@@ -16,6 +16,12 @@ KataHex GTP commands used:
 - clear_board: Reset the board
 - genmove COLOR: Generate and play a move for COLOR (black/white)
 - play COLOR VERTEX: Play a move at the given vertex
+
+python scripts/data/generate_katahex_dataset.py --config_path external/katahex/config_deterministic.cfg
+python scripts/data/generate_katahex_dataset.py \
+    --output_file data/openspiel/hex_golden.jsonl \
+    --processed_log_file log/data/openspiel/hex_processed.log \
+    --workers 8
 """
 
 import os
@@ -24,6 +30,8 @@ import subprocess
 import json
 import argparse
 from typing import Optional, List, Dict, Any
+import concurrent.futures
+import threading
 
 # Add path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/affinetes/templates'))
@@ -161,18 +169,35 @@ def openspiel_action_to_gtp_vertex(action: int, board_size: int) -> str:
     return f"{col_char}{row + 1}"
 
 
-# Create Actor instance for using _create_opponent_bot
-_actor = Actor()
+def _generate_single_trajectory(args: tuple) -> Optional[Dict[str, Any]]:
+    """Wrapper function for multiprocessing - creates fresh KataHex instance per task."""
+    task_id, seed, katahex_path, model_path, config_path, max_visits = args
+    try:
+        return generate_katahex_trajectory(
+            task_id=task_id,
+            seed=seed,
+            katahex_path=katahex_path,
+            model_path=model_path,
+            config_path=config_path,
+            max_visits=max_visits,
+        )
+    except Exception as e:
+        print(f"Error generating trajectory for task_id={task_id}, seed={seed}: {e}")
+        return None
 
 
 def generate_katahex_trajectory(
     task_id: int,
     seed: int,
-    katahex: KataHexGTP,
+    katahex_path: str,
+    model_path: str,
+    config_path: str,
     max_visits: int = 500,
-) -> List[Dict[str, Any]]:
+) -> Optional[Dict[str, Any]]:
     """
     Generate winning trajectory using KataHex vs MCTS opponent.
+
+    Creates a fresh KataHex instance for each task to ensure determinism.
 
     - KataHex plays as the "learner" (same player_id as LLM in evaluation)
     - MCTS bot plays as opponent (exact same seed as evaluation)
@@ -183,11 +208,13 @@ def generate_katahex_trajectory(
     Args:
         task_id: Task ID (determines board size for hex)
         seed: Random seed (same as evaluation seed)
-        katahex: KataHexGTP instance
+        katahex_path: Path to katahex binary
+        model_path: Path to neural network model
+        config_path: Path to config file
         max_visits: MCTS visits per move for KataHex
 
     Returns:
-        List with single trajectory dict for KataHex player
+        Trajectory dict if successful, None otherwise
     """
     # Decode task_id to get board_size
     config = decode_task_id(task_id)
@@ -203,116 +230,139 @@ def generate_katahex_trajectory(
     katahex_player_id = seed % num_players
     opponent_player_id = 1 - katahex_player_id
 
-    # Setup KataHex
-    katahex.set_board_size(board_size)
-    katahex.clear_board()
-
-    # Create OpenSpiel game for state tracking
-    game = pyspiel.load_game("hex", {"board_size": board_size})
-    state = game.new_initial_state()
-
-    # Create MCTS opponent using Actor._create_opponent_bot (exact same as evaluation)
-    # In evaluation: _create_opponent_bot(opponent, player_id, seed + 2 + player_id, game, agent)
-    mcts_opponent = _actor._create_opponent_bot(
-        "mcts", opponent_player_id, seed + 2 + opponent_player_id, game, agent
+    # Create fresh KataHex instance for this task (ensures determinism)
+    katahex = KataHexGTP(
+        katahex_path=katahex_path,
+        model_path=model_path,
+        config_path=config_path,
+        max_visits=max_visits,
     )
 
-    # Track conversation for KataHex player only
-    conversation = []
-    system_prompt_generated = False
-    system_prompt = agent.generate_system_prompt()
+    if not katahex.start():
+        print(f"Failed to start KataHex for task_id={task_id}")
+        return None
 
-    # Play the game
-    moves = []  # [(player, action), ...]
-    colors = ["black", "white"]
+    try:
+        # Setup KataHex
+        katahex.set_board_size(board_size)
+        katahex.clear_board()
 
-    while not state.is_terminal():
-        current_player = state.current_player()
-        legal_actions = state.legal_actions(current_player)
+        # Create OpenSpiel game for state tracking
+        game = pyspiel.load_game("hex", {"board_size": board_size})
+        state = game.new_initial_state()
 
-        if current_player == katahex_player_id:
-            # KataHex's turn - generate conversation and get move
+        # Create Actor instance for this task
+        actor = Actor()
 
-            # Generate system prompt if not done
-            if not system_prompt_generated:
+        # Create MCTS opponent using Actor._create_opponent_bot (exact same as evaluation)
+        # In evaluation: _create_opponent_bot(opponent, player_id, seed + 2 + player_id, game, agent)
+        mcts_opponent = actor._create_opponent_bot(
+            "mcts", opponent_player_id, seed + 2 + opponent_player_id, game, agent
+        )
+
+        # Track conversation for KataHex player only
+        conversation = []
+        system_prompt_generated = False
+        system_prompt = agent.generate_system_prompt()
+
+        # Play the game
+        moves = []  # [(player, action), ...]
+        colors = ["black", "white"]
+
+        while not state.is_terminal():
+            current_player = state.current_player()
+            legal_actions = state.legal_actions(current_player)
+
+            if current_player == katahex_player_id:
+                # KataHex's turn - generate conversation and get move
+
+                # Generate system prompt if not done
+                if not system_prompt_generated:
+                    conversation.append({
+                        "role": "system",
+                        "content": system_prompt
+                    })
+                    system_prompt_generated = True
+
+                # Generate user prompt
+                user_prompt = agent.generate_user_prompt(
+                    state=state,
+                    player_id=current_player,
+                    legal_actions=legal_actions
+                )
                 conversation.append({
-                    "role": "system",
-                    "content": system_prompt
+                    "role": "user",
+                    "content": user_prompt
                 })
-                system_prompt_generated = True
 
-            # Generate user prompt
-            user_prompt = agent.generate_user_prompt(
-                state=state,
-                player_id=current_player,
-                legal_actions=legal_actions
-            )
-            conversation.append({
-                "role": "user",
-                "content": user_prompt
-            })
+                # Get move from KataHex
+                color = colors[current_player]
+                vertex = katahex.genmove(color)
 
-            # Get move from KataHex
-            color = colors[current_player]
-            vertex = katahex.genmove(color)
+                if vertex is None or vertex == "resign":
+                    print(f"Warning: KataHex returned {vertex} at move {len(moves)}")
+                    return None
 
-            if vertex is None or vertex == "resign":
-                print(f"Warning: KataHex returned {vertex} at move {len(moves)}")
-                break
+                # Convert to OpenSpiel action
+                action = gtp_vertex_to_openspiel_action(vertex, board_size)
 
-            # Convert to OpenSpiel action
-            action = gtp_vertex_to_openspiel_action(vertex, board_size)
+                # Record assistant response
+                conversation.append({
+                    "role": "assistant",
+                    "content": str(action)
+                })
+            else:
+                # MCTS opponent's turn
+                action = mcts_opponent.step(state)
 
-            # Record assistant response
-            conversation.append({
-                "role": "assistant",
-                "content": str(action)
-            })
+                # Tell KataHex about opponent's move
+                vertex = openspiel_action_to_gtp_vertex(action, board_size)
+                color = colors[current_player]
+                katahex.play(color, vertex)
+
+            # Apply to OpenSpiel state
+            state.apply_action(action)
+            moves.append((current_player, action))
+
+        # Get final returns
+        returns = state.returns()
+
+        # Get KataHex player's result
+        katahex_return = returns[katahex_player_id]
+
+        # Normalize score
+        if katahex_return > 0:
+            score = 1.0
+        elif katahex_return < 0:
+            score = 0.0
         else:
-            # MCTS opponent's turn
-            action = mcts_opponent.step(state)
+            score = 0.5
 
-            # Tell KataHex about opponent's move
-            vertex = openspiel_action_to_gtp_vertex(action, board_size)
-            color = colors[current_player]
-            katahex.play(color, vertex)
+        # Only return trajectory if KataHex won (golden trajectory)
+        if score <= 0.5:
+            return None
 
-        # Apply to OpenSpiel state
-        state.apply_action(action)
-        moves.append((current_player, action))
+        # Build trajectory for KataHex player only
+        trajectory = {
+            'conversation': conversation,
+            'score': score,
+            'success': True,
+            'task_id': task_id,
+            'seed': seed,
+            'game_name': 'hex',
+            'player_id': katahex_player_id,
+            'returns': list(returns),
+            'board_size': board_size,
+            'total_moves': len(moves),
+            'generator': 'katahex',
+            'max_visits': max_visits,
+            'katahex_won': True,
+        }
 
-    # Get final returns
-    returns = state.returns()
+        return trajectory
 
-    # Get KataHex player's result
-    katahex_return = returns[katahex_player_id]
-
-    # Normalize score
-    if katahex_return > 0:
-        score = 1.0
-    elif katahex_return < 0:
-        score = 0.0
-    else:
-        score = 0.5
-
-    # Build trajectory for KataHex player only
-    trajectory = {
-        'conversation': conversation,
-        'score': score,
-        'success': score > 0.5,
-        'task_id': task_id,
-        'seed': seed,
-        'game_name': 'hex',
-        'player_id': katahex_player_id,
-        'returns': list(returns),
-        'board_size': board_size,
-        'total_moves': len(moves),
-        'generator': 'katahex',
-        'max_visits': max_visits,
-        'katahex_won': score > 0.5,
-    }
-
-    return [trajectory]
+    finally:
+        katahex.stop()
 
 
 def generate_trajectories_batch(
@@ -320,12 +370,16 @@ def generate_trajectories_batch(
     seeds: List[int],
     katahex_path: str = "external/katahex/build/katahex",
     model_path: str = "external/katahex/katahex_model_20220618.bin.gz",
-    config_path: str = "external/katahex/config.cfg",
+    config_path: str = "external/katahex/config_deterministic.cfg",
     max_visits: int = 500,
     output_file: Optional[str] = None,
+    processed_log_file: Optional[str] = None,
+    workers: int = 4,
 ) -> List[Dict[str, Any]]:
     """
-    Generate multiple trajectories using KataHex.
+    Generate multiple trajectories using KataHex with parallel processing.
+
+    Each task creates a fresh KataHex instance to ensure determinism.
 
     Args:
         task_ids: List of task IDs
@@ -334,7 +388,9 @@ def generate_trajectories_batch(
         model_path: Path to neural network model
         config_path: Path to config file
         max_visits: MCTS visits per move
-        output_file: Optional file to write results
+        output_file: Optional file to write winning trajectories
+        processed_log_file: Optional file to log all processed task_ids
+        workers: Number of parallel workers
 
     Returns:
         List of all generated trajectories
@@ -342,49 +398,59 @@ def generate_trajectories_batch(
     if len(task_ids) != len(seeds):
         raise ValueError("task_ids and seeds must have same length")
 
-    katahex = KataHexGTP(
-        katahex_path=katahex_path,
-        model_path=model_path,
-        config_path=config_path,
-        max_visits=max_visits,
-    )
-
     all_trajectories = []
+    wins = 0
+    losses = 0
+    file_lock = threading.Lock()
 
-    print(f"Starting KataHex...")
-    if not katahex.start():
-        print("Failed to start KataHex")
-        return []
+    # Prepare task arguments
+    task_args = [
+        (task_id, seed, katahex_path, model_path, config_path, max_visits)
+        for task_id, seed in zip(task_ids, seeds)
+    ]
 
     try:
         from tqdm import tqdm
-        iterator = tqdm(zip(task_ids, seeds), total=len(task_ids), desc="Generating")
+        pbar = tqdm(total=len(task_args), desc="Generating")
     except ImportError:
-        iterator = zip(task_ids, seeds)
+        pbar = None
 
-    try:
-        for task_id, seed in iterator:
-            try:
-                trajectories = generate_katahex_trajectory(
-                    task_id=task_id,
-                    seed=seed,
-                    katahex=katahex,
-                    max_visits=max_visits,
-                )
-                all_trajectories.extend(trajectories)
+    # Process in parallel
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_generate_single_trajectory, arg): arg for arg in task_args}
 
-                # Write to file if specified
+        for future in concurrent.futures.as_completed(futures):
+            arg = futures[future]
+            task_id, seed, _, _, _, _ = arg
+            trajectory = future.result()
+
+            # Log processed task_id (both wins and losses)
+            if processed_log_file:
+                with file_lock:
+                    with open(processed_log_file, 'a') as f:
+                        f.write(f"{task_id}\n")
+
+            if trajectory is not None:
+                wins += 1
+                all_trajectories.append(trajectory)
+
+                # Write winning trajectory to output file
                 if output_file:
-                    with open(output_file, 'a') as f:
-                        for traj in trajectories:
-                            f.write(json.dumps(traj) + '\n')
+                    with file_lock:
+                        with open(output_file, 'a') as f:
+                            f.write(json.dumps(trajectory) + '\n')
+            else:
+                losses += 1
 
-            except Exception as e:
-                print(f"Error generating trajectory for task_id={task_id}, seed={seed}: {e}")
+            if pbar:
+                pbar.update(1)
 
-    finally:
-        katahex.stop()
+    if pbar:
+        pbar.close()
 
+    total = wins + losses
+    win_rate = (wins / total * 100) if total > 0 else 0
+    print(f"\nBatch complete: {wins} wins, {losses} losses (win rate: {win_rate:.1f}%)")
     return all_trajectories
 
 
@@ -397,6 +463,8 @@ def main():
                         help='KataHex MCTS visits per move')
     parser.add_argument('--output_file', type=str, default='data/openspiel/hex_golden.jsonl',
                         help='Output file path')
+    parser.add_argument('--processed_log_file', type=str, default='log/data/openspiel/hex_processed.log',
+                        help='Log file to track all processed task_ids (wins and losses)')
     parser.add_argument('--katahex_path', type=str,
                         default='external/katahex/build/katahex',
                         help='Path to katahex binary')
@@ -404,28 +472,29 @@ def main():
                         default='external/katahex/katahex_model_20220618.bin.gz',
                         help='Path to neural network model')
     parser.add_argument('--config_path', type=str,
-                        default='external/katahex/config.cfg',
-                        help='Path to config file')
+                        default='external/katahex/config_deterministic.cfg',
+                        help='Path to config file (use config_deterministic.cfg for reproducible output)')
     parser.add_argument('--limit', type=int, default=None,
                         help='Limit number of tasks to process')
     parser.add_argument('--latest_n', type=int, default=200,
                         help='Number of latest tasks to collect per env')
+    parser.add_argument('--workers', type=int, default=4,
+                        help='Number of parallel workers')
     args = parser.parse_args()
 
     # Import get_sampling_list
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
     from src.data import get_sampling_list
 
-    # Load existing task_ids from output file to skip already processed tasks
-    existing_task_ids = set()
-    if os.path.exists(args.output_file):
-        with open(args.output_file, 'r') as f:
+    # Load processed task_ids from log file (includes both wins and losses)
+    processed_task_ids = set()
+    if os.path.exists(args.processed_log_file):
+        with open(args.processed_log_file, 'r') as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    data = json.loads(line)
-                    existing_task_ids.add(data['task_id'])
-        print(f"Loaded {len(existing_task_ids)} existing task_ids from {args.output_file}")
+                    processed_task_ids.add(int(line))
+        print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
 
     # Load merged.json and get sampling list
     with open(args.merged_file, 'r') as f:
@@ -444,7 +513,7 @@ def main():
     for task in hex_tasks:
         task_id = task['task_id']
         seed = task['seed']
-        if task_id in existing_task_ids:
+        if task_id in processed_task_ids:
             skipped_existing += 1
             continue
         task_ids.append(task_id)
@@ -464,13 +533,16 @@ def main():
 
     # Create output directory
     os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(args.processed_log_file) or '.', exist_ok=True)
 
     print(f"\nKataHex Dataset Generation")
     print(f"=" * 50)
     print(f"Merged file: {args.merged_file}")
     print(f"Number of tasks: {len(task_ids)}")
     print(f"Max visits: {args.max_visits}")
+    print(f"Workers: {args.workers}")
     print(f"Output file: {args.output_file}")
+    print(f"Processed log file: {args.processed_log_file}")
     print()
 
     trajectories = generate_trajectories_batch(
@@ -481,11 +553,14 @@ def main():
         config_path=args.config_path,
         max_visits=args.max_visits,
         output_file=args.output_file,
+        processed_log_file=args.processed_log_file,
+        workers=args.workers,
     )
 
     print(f"\nGeneration complete!")
     print(f"Total trajectories: {len(trajectories)}")
     print(f"Output file: {args.output_file}")
+    print(f"Processed log file: {args.processed_log_file}")
 
 
 if __name__ == "__main__":

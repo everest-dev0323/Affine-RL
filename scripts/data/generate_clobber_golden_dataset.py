@@ -10,6 +10,12 @@ This script:
 
 Unlike KataHex for Hex, there's no specialized Clobber engine.
 We use a stronger MCTS (more simulations) to generate winning trajectories.
+
+
+python scripts/data/generate_clobber_golden_dataset.py \
+    --output_file data/openspiel/clobber_golden.jsonl \
+    --processed_log_file log/data/openspiel/clobber_processed.log \
+    --workers 8
 """
 
 import os
@@ -86,14 +92,14 @@ def generate_clobber_golden_trajectory(
 
     # Create strong MCTS player (higher simulations)
     strong_evaluator = SafeRandomRolloutEvaluator(
-        n_rollouts=100, random_state=np.random.RandomState(seed + 100)
+        n_rollouts=100, random_state=np.random.RandomState(12345)
     )
     strong_mcts = mcts.MCTSBot(
         game=game,
         uct_c=1.414,
         max_simulations=strong_mcts_simulations,
         evaluator=strong_evaluator,
-        random_state=np.random.RandomState(seed + 101),
+        random_state=np.random.RandomState(12345),
     )
 
     # Track conversation for strong MCTS player only
@@ -187,6 +193,7 @@ def generate_trajectories_batch(
     seeds: List[int],
     strong_mcts_simulations: int = 3000,
     output_file: Optional[str] = None,
+    processed_log_file: Optional[str] = None,
     workers: int = 4,
 ) -> List[Dict[str, Any]]:
     """
@@ -196,7 +203,8 @@ def generate_trajectories_batch(
         task_ids: List of task IDs
         seeds: List of seeds (same length as task_ids)
         strong_mcts_simulations: Simulations for strong MCTS
-        output_file: Optional file to write results
+        output_file: Optional file to write winning trajectories
+        processed_log_file: Optional file to log all processed task_ids (wins and losses)
         workers: Number of parallel workers
 
     Returns:
@@ -227,13 +235,21 @@ def generate_trajectories_batch(
         futures = {executor.submit(_generate_single_trajectory, arg): arg for arg in task_args}
 
         for future in concurrent.futures.as_completed(futures):
+            arg = futures[future]
+            task_id, seed, _ = arg
             trajectory = future.result()
+
+            # Log processed task_id (both wins and losses)
+            if processed_log_file:
+                with file_lock:
+                    with open(processed_log_file, 'a') as f:
+                        f.write(f"{task_id}\n")
 
             if trajectory is not None:
                 wins += 1
                 all_trajectories.append(trajectory)
 
-                # Write to file immediately if specified (thread-safe)
+                # Write winning trajectory to output file
                 if output_file:
                     with file_lock:
                         with open(output_file, 'a') as f:
@@ -261,6 +277,8 @@ def main():
                         help='Strong MCTS simulations per move')
     parser.add_argument('--output_file', type=str, default='data/openspiel/clobber_golden.jsonl',
                         help='Output file path')
+    parser.add_argument('--processed_log_file', type=str, default='log/data/openspiel/clobber_processed.log',
+                        help='Log file to track all processed task_ids (wins and losses)')
     parser.add_argument('--limit', type=int, default=None,
                         help='Limit number of tasks to process')
     parser.add_argument('--latest_n', type=int, default=200,
@@ -273,16 +291,15 @@ def main():
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
     from src.data import get_sampling_list
 
-    # Load existing task_ids from output file to skip already processed tasks
-    existing_task_ids = set()
-    if os.path.exists(args.output_file):
-        with open(args.output_file, 'r') as f:
+    # Load processed task_ids from log file (includes both wins and losses)
+    processed_task_ids = set()
+    if os.path.exists(args.processed_log_file):
+        with open(args.processed_log_file, 'r') as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    data = json.loads(line)
-                    existing_task_ids.add(data['task_id'])
-        print(f"Loaded {len(existing_task_ids)} existing task_ids from {args.output_file}")
+                    processed_task_ids.add(int(line))
+        print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
 
     # Load merged.json and get sampling list
     with open(args.merged_file, 'r') as f:
@@ -301,7 +318,7 @@ def main():
     for task in clobber_tasks:
         task_id = task['task_id']
         seed = task['seed']
-        if task_id in existing_task_ids:
+        if task_id in processed_task_ids:
             skipped_existing += 1
             continue
         task_ids.append(task_id)
@@ -321,6 +338,7 @@ def main():
 
     # Create output directory
     os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(args.processed_log_file) or '.', exist_ok=True)
 
     print(f"\nClobber Golden Dataset Generation")
     print(f"=" * 50)
@@ -329,6 +347,7 @@ def main():
     print(f"Strong MCTS simulations: {args.strong_mcts_sims}")
     print(f"Workers: {args.workers}")
     print(f"Output file: {args.output_file}")
+    print(f"Processed log file: {args.processed_log_file}")
     print()
 
     trajectories = generate_trajectories_batch(
@@ -336,12 +355,14 @@ def main():
         seeds=seeds,
         strong_mcts_simulations=args.strong_mcts_sims,
         output_file=args.output_file,
+        processed_log_file=args.processed_log_file,
         workers=args.workers,
     )
 
     print(f"\nGeneration complete!")
     print(f"Golden trajectories saved: {len(trajectories)}")
     print(f"Output file: {args.output_file}")
+    print(f"Processed log file: {args.processed_log_file}")
 
 
 if __name__ == "__main__":
