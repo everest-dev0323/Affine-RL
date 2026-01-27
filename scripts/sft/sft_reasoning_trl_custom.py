@@ -232,27 +232,39 @@ def create_tokenized_dataset(
     Returns:
         Dataset with 'input_ids', 'labels', and 'attention_mask'
     """
-    samples = []
+    # Create initial dataset with conversations
+    dataset = Dataset.from_list([{"conversation": conv} for conv in conversations])
 
-    print("Tokenizing conversations and creating labels...")
-    for conv in tqdm(conversations, desc="Tokenizing"):
-        if reasoning:
+    response_marker = "<|im_start|>assistant\n<think>\n" if reasoning else "<|im_start|>assistant\n"
+
+    def tokenize_fn(examples):
+        """Tokenize a batch of conversations."""
+        results = {"input_ids": [], "labels": [], "attention_mask": []}
+
+        for conv in examples["conversation"]:
             sample = tokenize_conversation_with_labels(
                 conversation=conv,
                 tokenizer=tokenizer,
                 max_length=max_length,
-                response_marker="<|im_start|>assistant\n<think>\n",
+                response_marker=response_marker,
             )
-        else:
-            sample = tokenize_conversation_with_labels(
-                conversation=conv,
-                tokenizer=tokenizer,
-                max_length=max_length,
-                response_marker="<|im_start|>assistant\n",
-            )
-        samples.append(sample)
+            results["input_ids"].append(sample["input_ids"])
+            results["labels"].append(sample["labels"])
+            results["attention_mask"].append(sample["attention_mask"])
 
-    return Dataset.from_list(samples)
+        return results
+
+    print(f"Tokenizing {len(conversations)} conversations with {num_proc} processes...")
+    tokenized_dataset = dataset.map(
+        tokenize_fn,
+        batched=True,
+        batch_size=100,
+        num_proc=num_proc,
+        remove_columns=["conversation"],
+        desc="Tokenizing",
+    )
+
+    return tokenized_dataset
 
 
 def extract_sub_conversations(conversation: list) -> list:
@@ -333,9 +345,11 @@ def load_conversations_for_sft(data_dir: str, max_samples_per_file: int = 5000, 
                                 file_samples.append({"messages": sub_conv})
                         else:
                             # Remove reasoning_content from last message when reasoning is disabled
-                            if conv and "reasoning_content" in conv[-1]:
-                                conv = conv[:-1] + [{k: v for k, v in conv[-1].items() if k != "reasoning_content"}]
-                            file_samples.append({"messages": conv})
+                            cleaned_conv = []
+                            for msg in conv:
+                                cleaned_msg = {k: v for k, v in msg.items() if k != "reasoning_content"}
+                                cleaned_conv.append(cleaned_msg)
+                            file_samples.append({"messages": cleaned_conv})
 
         print(f"  Loaded {len(file_samples)} samples from {jsonl_file.name}")
         samples.extend(file_samples)
@@ -521,28 +535,28 @@ def main():
         conversations=list(anchor_dataset["messages"]),
         tokenizer=tokenizer,
         max_length=config.max_seq_length,
-        reasoning=False,
+        reasoning=True,
     )
     
     tokenized_dyck_dataset = create_tokenized_dataset(
         conversations=list(dyck_dataset["messages"]),
         tokenizer=tokenizer,
         max_length=config.max_seq_length,
-        reasoning=False,
+        reasoning=True,
     )
     
     tokenized_print_dataset = create_tokenized_dataset(
         conversations=list(print_dataset["messages"]),
         tokenizer=tokenizer,
         max_length=config.max_seq_length,
-        reasoning=False,
+        reasoning=True,
     )
     
     tokenized_game_reasoning_dataset = create_tokenized_dataset(
         conversations=list(game_reasoning_dataset["messages"]),
         tokenizer=tokenizer,
         max_length=config.max_seq_length,
-        reasoning=False,
+        reasoning=True,
     )
     
     tokenized_game_none_reasoning_dataset = create_tokenized_dataset(
