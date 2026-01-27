@@ -188,7 +188,7 @@ def tokenize_conversation_with_labels(
             max_length=max_length,
             return_tensors=None,
         )
-        response_start_idx = len(prefix_tokenized["input_ids"])
+        response_start_idx = len(prefix_tokenized["input_ids"]) if response_marker == "<|im_start|>assistant\n" else len(prefix_tokenized["input_ids"]) - 2
 
         # Tokenize text up to response end to find token index
         prefix_end_text = full_text[:response_end]
@@ -235,7 +235,7 @@ def create_tokenized_dataset(
     # Create initial dataset with conversations
     dataset = Dataset.from_list([{"conversation": conv} for conv in conversations])
 
-    response_marker = "<|im_start|>assistant\n<think>\n" if reasoning else "<|im_start|>assistant\n"
+    response_marker = "<|im_start|>assistant\n<think>" if reasoning else "<|im_start|>assistant\n"
 
     def tokenize_fn(examples):
         """Tokenize a batch of conversations."""
@@ -258,7 +258,7 @@ def create_tokenized_dataset(
     tokenized_dataset = dataset.map(
         tokenize_fn,
         batched=True,
-        batch_size=100,
+        batch_size=32,
         num_proc=num_proc,
         remove_columns=["conversation"],
         desc="Tokenizing",
@@ -506,7 +506,7 @@ def main():
     {%- if ns.thinking %}
         {{- '<|im_start|>assistant\n' }}
     {%- else %}
-        {{- '<|im_start|>assistant\n<think>\n' }}
+        {{- '<|im_start|>assistant\n<think>' }}
     {%- endif %}
 {%- endif %}"""
 
