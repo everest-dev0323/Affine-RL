@@ -594,7 +594,13 @@ def main():
     train_dataset = split["train"]
     eval_dataset = split["test"]
 
-    print(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    # Use multiple eval datasets: main validation + gold dataset for monitoring
+    eval_datasets = {
+        "validation": eval_dataset,
+        "gold": tokenized_gold_dataset,  # Monitor performance on gold dataset separately
+    }
+
+    print(f"Train: {len(train_dataset)}, Eval (validation): {len(eval_dataset)}, Eval (gold): {len(tokenized_gold_dataset)}")
 
     # SFTConfig - no dataset_text_field since we provide pre-tokenized input_ids/labels
     training_args = SFTConfig(
@@ -619,7 +625,7 @@ def main():
         eval_strategy="steps",
         save_total_limit=config.save_total_limit,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="eval_validation_loss",  # Use validation split (not gold) for best model selection
         greater_is_better=False,
         report_to="wandb" if config.use_wandb else "none",
         dataloader_pin_memory=True,
@@ -627,11 +633,12 @@ def main():
     )
 
     # Create SFTTrainer - no train_on_responses_only needed since labels are pre-masked
+    # Use eval_dataset dict to monitor both validation and gold dataset separately
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        eval_dataset=eval_datasets,  # Dict of multiple eval datasets
         processing_class=tokenizer,
     )
     
