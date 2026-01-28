@@ -27,6 +27,8 @@ from tqdm import tqdm
 from unsloth import FastLanguageModel
 from trl import SFTTrainer, SFTConfig
 
+torch.autograd.set_detect_anomaly(True)
+
 
 @dataclass
 class TrainingConfig:
@@ -188,7 +190,7 @@ def tokenize_conversation_with_labels(
             max_length=max_length,
             return_tensors=None,
         )
-        response_start_idx = len(prefix_tokenized["input_ids"]) if response_marker == "<|im_start|>assistant\n" else len(prefix_tokenized["input_ids"]) - 2
+        response_start_idx = len(prefix_tokenized["input_ids"]) if response_marker == "<|im_start|>assistant\n" else len(prefix_tokenized["input_ids"]) - 1
 
         # Tokenize text up to response end to find token index
         prefix_end_text = full_text[:response_end]
@@ -606,7 +608,7 @@ def main():
     training_args = SFTConfig(
         output_dir=config.output_dir,
         packing=False,  # Packing not compatible with pre-tokenized data
-        optim="adamw_8bit",
+        optim="adamw",
         # Training settings
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
