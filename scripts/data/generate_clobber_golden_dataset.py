@@ -16,6 +16,13 @@ python scripts/data/generate_clobber_golden_dataset.py \
     --output_file data/openspiel/clobber_golden.jsonl \
     --processed_log_file log/data/openspiel/clobber_processed.log \
     --workers 8
+
+python scripts/data/generate_clobber_golden_dataset.py \
+    --output_file data/openspiel/clobber_determine.jsonl \
+    --processed_log_file log/data/openspiel/clobber_determine.log \
+    --workers 100 \
+    --random \
+    --num_random 10000
 """
 
 import os
@@ -24,6 +31,7 @@ import json
 import argparse
 from typing import Optional, List, Dict, Any
 import numpy as np
+import random
 import concurrent.futures
 import threading
 
@@ -285,52 +293,63 @@ def main():
                         help='Number of latest tasks to collect per env')
     parser.add_argument('--workers', type=int, default=4,
                         help='Number of parallel workers')
+    parser.add_argument('--random', action='store_true', default=False,
+                        help='Generate random task_ids and seeds instead of using merged.json')
+    parser.add_argument('--num_random', type=int, default=1000,
+                        help='Number of random tasks to generate (only used with --random)')
     args = parser.parse_args()
 
-    # Import get_sampling_list
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
-    from src.data import get_sampling_list
 
-    # Load processed task_ids from log file (includes both wins and losses)
-    processed_task_ids = set()
-    if os.path.exists(args.processed_log_file):
-        with open(args.processed_log_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    processed_task_ids.add(int(line))
-        print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
+    if args.random:
+        # Generate random task_ids and seeds
+        task_ids = [random.randint(700_000_000, 799_999_999) for _ in range(args.num_random)]
+        seeds = [random.randint(0, 2**32 - 1) for _ in range(args.num_random)]
+        print(f"Generated {len(task_ids)} random hex tasks")
+    else:
+        # Import get_sampling_list
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
+        from src.data import get_sampling_list
 
-    # Load merged.json and get sampling list
-    with open(args.merged_file, 'r') as f:
-        merged_data = json.load(f)
+        # Load processed task_ids from log file (includes both wins and losses)
+        processed_task_ids = set()
+        if os.path.exists(args.processed_log_file):
+            with open(args.processed_log_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        processed_task_ids.add(int(line))
+            print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
 
-    sampling_list = get_sampling_list(merged_data, latest_n=args.latest_n)
+        # Load merged.json and get sampling list
+        with open(args.merged_file, 'r') as f:
+            merged_data = json.load(f)
 
-    # Get clobber tasks from sampling list
-    clobber_tasks = sampling_list.get('GAME', {}).get('clobber', [])
+        sampling_list = get_sampling_list(merged_data, latest_n=args.latest_n)
 
-    # Filter out already processed tasks
-    task_ids = []
-    seeds = []
-    skipped_existing = 0
+        # Get clobber tasks from sampling list
+        clobber_tasks = sampling_list.get('GAME', {}).get('clobber', [])
 
-    for task in clobber_tasks:
-        task_id = task['task_id']
-        seed = task['seed']
-        if task_id in processed_task_ids:
-            skipped_existing += 1
-            continue
-        task_ids.append(task_id)
-        seeds.append(seed)
+        # Filter out already processed tasks
+        task_ids = []
+        seeds = []
+        skipped_existing = 0
 
-    print(f"Found {len(clobber_tasks)} clobber tasks in merged.json")
-    print(f"Skipped {skipped_existing} already processed tasks")
-    print(f"Remaining {len(task_ids)} new clobber tasks to process")
+        for task in clobber_tasks:
+            task_id = task['task_id']
+            seed = task['seed']
+            if task_id in processed_task_ids:
+                skipped_existing += 1
+                continue
+            task_ids.append(task_id)
+            seeds.append(seed)
 
-    if args.limit:
-        task_ids = task_ids[:args.limit]
-        seeds = seeds[:args.limit]
+        print(f"Found {len(clobber_tasks)} clobber tasks in merged.json")
+        print(f"Skipped {skipped_existing} already processed tasks")
+        print(f"Remaining {len(task_ids)} new clobber tasks to process")
+
+        if args.limit:
+            task_ids = task_ids[:args.limit]
+            seeds = seeds[:args.limit]
 
     if len(task_ids) == 0:
         print("No tasks to process. Exiting.")
