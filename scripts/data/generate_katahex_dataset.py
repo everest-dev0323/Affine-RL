@@ -22,6 +22,12 @@ python scripts/data/generate_katahex_dataset.py \
     --output_file data/openspiel/hex_golden.jsonl \
     --processed_log_file log/data/openspiel/hex_processed.log \
     --workers 8
+python scripts/data/generate_katahex_dataset.py \
+    --output_file data/openspiel/hex_determine.jsonl \
+    --processed_log_file log/data/openspiel/hex_processed_determine.log \
+    --workers 100 \
+    --random \
+    --num_random 10000
 """
 
 import os
@@ -29,6 +35,7 @@ import sys
 import subprocess
 import json
 import argparse
+import random
 from typing import Optional, List, Dict, Any
 import concurrent.futures
 import threading
@@ -480,48 +487,58 @@ def main():
                         help='Number of latest tasks to collect per env')
     parser.add_argument('--workers', type=int, default=4,
                         help='Number of parallel workers')
+    parser.add_argument('--random', action='store_true', default=False,
+                        help='Generate random task_ids and seeds instead of using merged.json')
+    parser.add_argument('--num_random', type=int, default=1000,
+                        help='Number of random tasks to generate (only used with --random)')
     args = parser.parse_args()
 
-    # Import get_sampling_list
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
-    from src.data import get_sampling_list
+    if args.random:
+        # Generate random task_ids and seeds
+        task_ids = [random.randint(600_000_000, 699_999_999) for _ in range(args.num_random)]
+        seeds = [random.randint(0, 2**32 - 1) for _ in range(args.num_random)]
+        print(f"Generated {len(task_ids)} random hex tasks")
+    else:
+        # Import get_sampling_list
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
+        from src.data import get_sampling_list
 
-    # Load processed task_ids from log file (includes both wins and losses)
-    processed_task_ids = set()
-    if os.path.exists(args.processed_log_file):
-        with open(args.processed_log_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    processed_task_ids.add(int(line))
-        print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
+        # Load processed task_ids from log file (includes both wins and losses)
+        processed_task_ids = set()
+        if os.path.exists(args.processed_log_file):
+            with open(args.processed_log_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        processed_task_ids.add(int(line))
+            print(f"Loaded {len(processed_task_ids)} processed task_ids from {args.processed_log_file}")
 
-    # Load merged.json and get sampling list
-    with open(args.merged_file, 'r') as f:
-        merged_data = json.load(f)
+        # Load merged.json and get sampling list
+        with open(args.merged_file, 'r') as f:
+            merged_data = json.load(f)
 
-    sampling_list = get_sampling_list(merged_data, latest_n=args.latest_n)
+        sampling_list = get_sampling_list(merged_data, latest_n=args.latest_n)
 
-    # Get hex tasks from sampling list
-    hex_tasks = sampling_list.get('GAME', {}).get('hex', [])
+        # Get hex tasks from sampling list
+        hex_tasks = sampling_list.get('GAME', {}).get('hex', [])
 
-    # Filter out already processed tasks
-    task_ids = []
-    seeds = []
-    skipped_existing = 0
+        # Filter out already processed tasks
+        task_ids = []
+        seeds = []
+        skipped_existing = 0
 
-    for task in hex_tasks:
-        task_id = task['task_id']
-        seed = task['seed']
-        if task_id in processed_task_ids:
-            skipped_existing += 1
-            continue
-        task_ids.append(task_id)
-        seeds.append(seed)
+        for task in hex_tasks:
+            task_id = task['task_id']
+            seed = task['seed']
+            if task_id in processed_task_ids:
+                skipped_existing += 1
+                continue
+            task_ids.append(task_id)
+            seeds.append(seed)
 
-    print(f"Found {len(hex_tasks)} hex tasks in merged.json")
-    print(f"Skipped {skipped_existing} already processed tasks")
-    print(f"Remaining {len(task_ids)} new hex tasks to process")
+        print(f"Found {len(hex_tasks)} hex tasks in merged.json")
+        print(f"Skipped {skipped_existing} already processed tasks")
+        print(f"Remaining {len(task_ids)} new hex tasks to process")
 
     if args.limit:
         task_ids = task_ids[:args.limit]
