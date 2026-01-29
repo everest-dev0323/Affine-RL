@@ -6,9 +6,8 @@ Loads JSONL conversation files and trains with SFTTrainer.
 Uses packing for efficient training (up to 2-3x speedup).
 
 Usage:
-    python scripts/sft/sft_reasoning_trl.py --config config/sft_reasoning_trl.yaml
-    python scripts/sft/sft_reasoning_trl.py --data_dir data_reasoning/openspiel --output_dir outputs/sft_trl
-    python scripts/sft/sft_reasoning_trl.py \
+    python scripts/sft/sft_reasoning_trl_custom.py --config config/sft_reasoning_trl.yaml
+    python scripts/sft/sft_reasoning_trl_custom.py \
     --config config/sft_reasoning_trl.yaml \
     --resume_from_checkpoint outputs/sft_reasoning_trl/checkpoint-3000
 """
@@ -26,8 +25,6 @@ from datasets import Dataset, concatenate_datasets
 from tqdm import tqdm
 from unsloth import FastLanguageModel
 from trl import SFTTrainer, SFTConfig
-
-torch.autograd.set_detect_anomaly(True)
 
 
 @dataclass
@@ -219,7 +216,7 @@ def create_tokenized_dataset(
     conversations: list,
     tokenizer,
     max_length: int = 32768,
-    num_proc: int = 8,
+    num_proc: int = 128,
     reasoning: bool = True
 ) -> Dataset:
     """
@@ -417,6 +414,9 @@ def main():
 
     # Use left padding for LLM training (consistent with inference)
     tokenizer.padding_side = "right"
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    
     
     tokenizer.chat_template = r"""{%- if tools %}
     {{- '<|im_start|>system\n' }}
@@ -608,7 +608,7 @@ def main():
     training_args = SFTConfig(
         output_dir=config.output_dir,
         packing=False,  # Packing not compatible with pre-tokenized data
-        optim="adamw",
+        optim="adamw_8bit",
         # Training settings
         num_train_epochs=config.num_train_epochs,
         per_device_train_batch_size=config.per_device_train_batch_size,
