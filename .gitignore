@@ -212,6 +212,7 @@ __marimo__/
 /datasets/
 dataset/
 data-sft/
+affine-dataset/
 models/
 wandb/
 
