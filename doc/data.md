@@ -23,6 +23,14 @@ pip install gdown
 gdown 1xMvP_75xgo0271nQbmlAJ40rvpKiFTgP
 ```
 
+```
+# 1. Set the GPU to Exclusive Process mode
+nvidia-smi -i 0 -c EXCLUSIVE_PROCESS
+
+# 2. Start the MPS Daemon
+nvidia-cuda-mps-control -d
+```
+
 ``` bash
 python scripts/data/generate_katahex_dataset.py \
     --output_file affine-dataset/openspiel/hex_golden.jsonl \
@@ -32,7 +40,7 @@ python scripts/data/generate_katahex_dataset.py \
 python scripts/data/generate_katahex_dataset.py \
     --output_file affine-dataset/openspiel/hex_determine.jsonl \
     --processed_log_file log/data/openspiel/hex_processed_determine.log \
-    --workers 100 \
+    --workers 50 \
     --random \
     --num_random 10000
 ```

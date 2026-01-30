@@ -10,6 +10,9 @@ Usage:
     python scripts/sft/sft_reasoning_trl_custom.py \
     --config config/sft_reasoning_trl.yaml \
     --resume_from_checkpoint outputs/sft_reasoning_trl/checkpoint-3000
+    
+    accelerate config
+    accelerate launch scripts/sft/sft_reasoning_trl_custom.py --config config/sft_reasoning_trl.yaml
 """
 
 import argparse
@@ -380,8 +383,9 @@ def main():
 
     print(f"Config: {config}")
 
-    # Setup wandb
-    if config.use_wandb:
+    # Setup wandb (only on main process to avoid duplicate logging)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if config.use_wandb and local_rank == 0:
         import wandb
         wandb.init(
             project=config.wandb_project,
