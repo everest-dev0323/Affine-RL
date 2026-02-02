@@ -1,0 +1,14 @@
+# mergekit-moe  scripts/moe/config.yml --trust-remote-code ./hybrid_model --cuda
+
+base_model: micleowen02/affine-crash-5CVLTzAwVNuFE6dsio9GDaZbVSGR67uHsk3BUEWCWPX7HLXH  # This donor provides the Attention/Norm layers
+gate_mode: hidden               # High quality: uses hidden states to route
+dtype: bfloat16                 # Recommended for Qwen models
+
+experts:
+  - source_model: micleowen02/affine-crash-5CVLTzAwVNuFE6dsio9GDaZbVSGR67uHsk3BUEWCWPX7HLXH
+    positive_prompts:
+      - "You are playing"
+  - source_model: mohantesting/Affine-rl-5CACt2RPTHvATaESHQ2yN31sMg2aAMUPSe3MhhMLNAnX3xqU
+
+# Qwen architecture often needs specific tokenizer handling
+tokenizer_source: base
