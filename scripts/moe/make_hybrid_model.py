@@ -1,9 +1,18 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+game_model = "micleowen02/affine-crash-5CVLTzAwVNuFE6dsio9GDaZbVSGR67uHsk3BUEWCWPX7HLXH"
+logic_model = "mohantesting/Affine-rl-5CACt2RPTHvATaESHQ2yN31sMg2aAMUPSe3MhhMLNAnX3xqU"
+
 # Load both models
-model1 = AutoModelForCausalLM.from_pretrained("path/to/model1")
-model2 = AutoModelForCausalLM.from_pretrained("path/to/model2")
+model1 = AutoModelForCausalLM.from_pretrained(
+    logic_model, 
+    torch_dtype="auto",
+    device_map="auto")
+model2 = AutoModelForCausalLM.from_pretrained(
+    game_model,
+    torch_dtype="auto",
+    device_map="auto")
 
 # Get state dictionaries
 state_dict1 = model1.state_dict()
@@ -21,10 +30,14 @@ for key in state_dict2.keys():
         print(f"Replaced: {key}")
 
 # Load merged weights
-merged_model = AutoModelForCausalLM.from_pretrained("path/to/model1")
+merged_model = AutoModelForCausalLM.from_pretrained(
+    game_model, 
+    torch_dtype="auto",
+    device_map="auto")
+
 merged_model.load_state_dict(new_state_dict)
 
 # Save
-merged_model.save_pretrained("path/to/merged_model")
-tokenizer = AutoTokenizer.from_pretrained("path/to/model1")
-tokenizer.save_pretrained("path/to/merged_model")
+merged_model.save_pretrained("./logic_backbone_game_expert")
+tokenizer = AutoTokenizer.from_pretrained(game_model, fix_mistral_regex=True)
+tokenizer.save_pretrained("./logic_backbone_game_expert")
