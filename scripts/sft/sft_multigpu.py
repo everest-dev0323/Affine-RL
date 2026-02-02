@@ -14,6 +14,8 @@ Usage:
     
     accelerate config
     accelerate launch scripts/sft/sft_reasoning_trl_custom.py --config config/sft_reasoning_trl.yaml
+    
+    accelerate launch scripts/sft/sft_multigpu.py --config config/sft_reasoning_trl.yaml --tokenized_data_dir data/tokenized &> output.log
 """
 
 import argparse
