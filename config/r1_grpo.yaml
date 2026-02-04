@@ -1,0 +1,99 @@
+# ============================================================================
+# GRPO Training Configuration for Game Tasks (Othello)
+# ============================================================================
+# Usage:
+#   accelerate launch --config_file config/deepspeed_zero3.yaml \
+#       scripts/rl/r1_grpo.py --config config/r1_grpo.yaml
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Model Arguments
+# ----------------------------------------------------------------------------
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: flash_attention_2
+trust_remote_code: true
+
+# ----------------------------------------------------------------------------
+# LoRA Arguments
+# ----------------------------------------------------------------------------
+use_peft: true
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# ----------------------------------------------------------------------------
+# Dataset Arguments
+# ----------------------------------------------------------------------------
+dataset_path: dataset/grpo  # Directory containing othello.jsonl, hex.jsonl
+max_samples: 1000000  # null for all samples
+
+# ----------------------------------------------------------------------------
+# Training Arguments
+# ----------------------------------------------------------------------------
+output_dir: runs/grpo-othello
+
+# Precision
+bf16: true
+
+# Batch size (effective batch = per_device * gradient_accum * num_gpus)
+# 8 x H100: per_device=1, grad_accum=4, num_gpus=8 -> effective=32
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+
+# Gradient checkpointing (saves memory)
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# Optimizer
+learning_rate: 1.0e-6
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# Training duration
+max_steps: 1000
+# num_train_epochs: 1  # Alternative to max_steps
+
+# ----------------------------------------------------------------------------
+# GRPO Specific Parameters
+# ----------------------------------------------------------------------------
+beta: 0.001  # KL penalty coefficient
+max_prompt_length: 8192
+max_completion_length: 8192
+num_generations: 8  # Number of completions per prompt
+
+# vLLM for fast generation (dedicated GPU)
+use_vllm: true
+vllm_device: cuda:7
+vllm_gpu_memory_utilization: 0.5
+
+# ----------------------------------------------------------------------------
+# Logging & Checkpointing
+# ----------------------------------------------------------------------------
+logging_strategy: steps
+logging_steps: 5
+report_to:
+  - wandb
+
+save_strategy: steps
+save_steps: 50
+save_total_limit: 3
+
+seed: 42
+
+# ----------------------------------------------------------------------------
+# Hub Settings (disabled)
+# ----------------------------------------------------------------------------
+push_to_hub: false
