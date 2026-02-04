@@ -9,7 +9,7 @@ git clone https://github.com/Bambuuai/Affine-H.git --recurse-submodules
 [Conda Installation Guide - Linux Terminal Installer](https://www.anaconda.com/docs/getting-started/miniconda/install#linux-terminal-installer)
 
 ```bash
-conda create -n affine python=3.11
+conda create -n affine python=3.12
 conda activate affine
 ```
 
