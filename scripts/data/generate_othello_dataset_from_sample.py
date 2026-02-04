@@ -23,6 +23,7 @@ import sys
 import json
 import argparse
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 # Add path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../AffineFoundation/affinetes/environments/openspiel'))
@@ -140,12 +141,14 @@ def generate_dataset_for_player(input_file: str, output_file: str, target_player
     return total_samples
 
 
-def generate_dataset(input_file: str, output_file: str):
+def generate_dataset(input_file: str, output_file: str, model: str):
     """Generate dataset from sample file for both players into one file."""
     game = pyspiel.load_game("othello")
     agent = GAME_AGENTS['othello']()
     system_prompt = agent.generate_system_prompt()
 
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    
     total_samples = 0
     total_games = 0
 
@@ -213,7 +216,7 @@ def generate_dataset(input_file: str, output_file: str):
 
                 # Write sample
                 sample = {
-                    "prompt": prompt,
+                    "prompt": tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True),
                     "label": str(action),
                     "extra_data": {"probabilities": converted_probabilities},
                     "env": "openspiel",
@@ -238,6 +241,7 @@ def generate_dataset(input_file: str, output_file: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate Othello dataset from sample file')
+    parser.add_argument('--model', type=str, default='micleowen02/affine-crash-5CVLTzAwVNuFE6dsio9GDaZbVSGR67uHsk3BUEWCWPX7HLXH')
     parser.add_argument('--input', type=str, default='dataset/sample/openspiel/othello_sample.jsonl',
                         help='Input sample file')
     parser.add_argument('--output', type=str, default='dataset/openrlhf/openspiel/othello_dataset.jsonl',
@@ -252,7 +256,7 @@ def main():
     print(f"Output: {args.output}")
     print()
 
-    count = generate_dataset(args.input, args.output)
+    count = generate_dataset(args.input, args.output, args.model)
     print(f"\nDataset saved to: {args.output}")
     print(f"Total samples: {count}")
 
