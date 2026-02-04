@@ -215,7 +215,7 @@ def generate_dataset(input_file: str, output_file: str):
                 sample = {
                     "prompt": prompt,
                     "label": str(action),
-                    "probabilities": converted_probabilities,
+                    "extra_data": {"probabilities": converted_probabilities},
                     "env": "openspiel",
                     "task": "othello",
                 }
@@ -240,7 +240,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate Othello dataset from sample file')
     parser.add_argument('--input', type=str, default='dataset/sample/openspiel/othello_sample.jsonl',
                         help='Input sample file')
-    parser.add_argument('--output', type=str, default='data/openspiel/othello_dataset.jsonl',
+    parser.add_argument('--output', type=str, default='dataset/openrlhf/openspiel/othello_dataset.jsonl',
                         help='Output dataset file')
     args = parser.parse_args()
 

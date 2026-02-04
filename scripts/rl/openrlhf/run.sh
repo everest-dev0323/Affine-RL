@@ -47,13 +47,15 @@ ray job submit --address="http://127.0.0.1:8265" \
    --input_key prompt \
    --label_key label \
    --apply_chat_template \
-   --remote_rm_url scripts/rl/tig_reward_func.py \
+   --extra_keys env task extra_data \
+   --remote_rm_url scripts/rl/openrlhf/reward_func.py \
    --dynamic_filtering \
    --dynamic_filtering_reward_range 0.0 1.0 \
    --save_path ./checkpoints/tig/final \
    --ckpt_path ./checkpoints/tig/ckpt \
    --save_steps 10 \
    --save_hf_ckpt \
+   --attn_implementation flash_attention_2 \
    --use_wandb true \
    --wandb_project tig-training \
    --wandb_run_name tig-qwen-8b

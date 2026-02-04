@@ -17,16 +17,14 @@ Usage:
     # Run training
     ray job submit --address="http://127.0.0.1:8265" \
         --runtime-env-json='{"working_dir": "."}' \
-        -- python scripts/rl/tig_openrlhf.py --config config/tig.yaml
+        -- python scripts/rl/openrlhf.py --config config/tig.yaml
 """
 
 import argparse
-import asyncio
 import json
 from pathlib import Path
 from typing import Dict, List
 
-import torch
 import yaml
 
 
@@ -36,7 +34,7 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def load_tig_dataset(dataset_path: str, max_data_per_task: int = 10000) -> List[Dict]:
+def load_dataset(dataset_path: str, max_data_per_task: int = 10000) -> List[Dict]:
     """
     Load TiG dataset from JSONL files organized by env/task.
     
@@ -71,23 +69,37 @@ def load_tig_dataset(dataset_path: str, max_data_per_task: int = 10000) -> List[
                         
                     trajectory = json.loads(line)
                     conversation = trajectory.get('conversation', [])
-                    
+
+                    # Extract extra data for verifier-based reward computation
+                    extra_data = {}
+                    if 'info' in trajectory:
+                        # lgc format with info containing task metadata
+                        extra_data['info'] = trajectory['info']
+                    if 'game_data' in trajectory:
+                        # lgc-v2 format with game_data
+                        extra_data['game_data'] = trajectory['game_data']
+                    if 'task_type' in trajectory:
+                        extra_data['task_type'] = trajectory['task_type']
+                    if 'metadata' in trajectory:
+                        extra_data['metadata'] = trajectory['metadata']
+
                     # Extract each assistant turn as a training sample
                     for i in range(len(conversation)):
                         if conversation[i].get('role') == 'assistant':
                             # Format for OpenRLHF: list of message dicts
                             prompt = conversation[:i]
                             ground_truth = conversation[i].get('content', '')
-                            
+
                             dataset.append({
                                 'prompt': prompt,  # List of {role, content} dicts
                                 'label': ground_truth,  # Ground truth for reward func
                                 'env': env.stem,
                                 'task': task_file.stem,
                                 'task_id': trajectory.get('task_id', 0),
+                                'extra_data': extra_data,  # Additional metadata for verifiers
                             })
                             task_count += 1
-                            
+
                             if task_count >= max_data_per_task:
                                 break
             
@@ -102,87 +114,28 @@ def load_tig_dataset(dataset_path: str, max_data_per_task: int = 10000) -> List[
     return dataset
 
 
-def create_reward_func_file(output_path: str = "scripts/rl/tig_reward_func.py"):
-    """Create the reward function file for OpenRLHF."""
-    reward_func_code = '''"""
-TiG Reward Function for OpenRLHF
+def get_reward_func_path() -> str:
+    """Get the path to the reward function file.
 
-This reward function computes binary rewards based on action matching
-for the Think in Games (TiG) training approach.
-"""
+    The reward function file (reward_func.py) contains detailed reward
+    computation for various environments including:
+    - lgc-v2: Logic tasks with verifiers (sudoku, game_of_24, boolean_expressions, etc.)
+    - lgc: Legacy logic tasks with i3_logic verifiers
+    - game/print: Simple equality check environments
 
-import asyncio
-import sys
-from pathlib import Path
-
-import torch
-
-# Add project root to path for imports
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
-from src.evaluation import reward_response, parse_response
-
-
-def reward_func(queries, prompts, labels, **kwargs):
-    """
-    Compute TiG rewards for generated responses.
-    
-    Args:
-        queries: List[str] - Full text (prompt + response)
-        prompts: List[str] - Original prompts only
-        labels: List[str] - Ground truth actions (from --label_key)
-        **kwargs: Additional info (env, task_id, etc.)
-    
     Returns:
-        dict with rewards, scores, and extra_logs
+        str: Absolute path to the reward function file
     """
-    batch_size = len(queries)
-    rewards = []
-    
-    for i in range(batch_size):
-        # Extract the response (remove prompt from full query)
-        full_text = queries[i]
-        prompt_text = prompts[i]
-        
-        # Response is everything after the prompt
-        response = full_text[len(prompt_text):].strip()
-        ground_truth = labels[i] if labels else ""
-        
-        # Parse response to extract action (handles <think> tags)
-        parsed_response = parse_response(response)
-        
-        # Simple equality check for reward
-        # For more complex environments, use reward_response async function
-        if parsed_response.strip() == ground_truth.strip():
-            reward = 1.0
-        else:
-            reward = 0.0
-        
-        rewards.append(reward)
-    
-    reward_tensor = torch.tensor(rewards, dtype=torch.float32)
-    
-    return {
-        "rewards": reward_tensor,  # Used for advantage calculation
-        "scores": reward_tensor,   # Used for dynamic filtering (DAPO)
-        "extra_logs": {
-            "mean_reward": reward_tensor.mean().item(),
-            "reward_std": reward_tensor.std().item() if len(rewards) > 1 else 0.0,
-            "num_correct": sum(rewards),
-            "accuracy": sum(rewards) / len(rewards) if rewards else 0.0,
-        },
-    }
-'''
-    
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'w') as f:
-        f.write(reward_func_code)
-    
-    print(f"✅ Created reward function file: {output_path}")
-    return str(output_path)
+    reward_func_path = Path(__file__).parent / "reward_func.py"
+
+    if not reward_func_path.exists():
+        raise FileNotFoundError(
+            f"Reward function file not found at {reward_func_path}. "
+            "Please ensure scripts/rl/openrlhf/reward_func.py exists."
+        )
+
+    print(f"✅ Using reward function file: {reward_func_path}")
+    return str(reward_func_path.resolve())
 
 
 def build_openrlhf_command(cfg: dict, dataset_path: str, reward_func_path: str) -> str:
@@ -259,6 +212,8 @@ def build_openrlhf_command(cfg: dict, dataset_path: str, reward_func_path: str) 
         "--input_key prompt",
         "--label_key label",
         "--apply_chat_template",
+        # Pass extra keys for detailed reward computation
+        "--extra_keys env task task_id extra_data",
     ])
 
     # === Custom Reward Function ===
@@ -271,7 +226,7 @@ def build_openrlhf_command(cfg: dict, dataset_path: str, reward_func_path: str) 
     ])
 
     # === Checkpointing ===
-    checkpoint_dir = cfg.get('checkpoint_dir', './checkpoints/tig-openrlhf')
+    checkpoint_dir = cfg.get('checkpoint_dir', './checkpoints/openrlhf')
     cmd_parts.extend([
         f"--save_path {checkpoint_dir}/final",
         f"--ckpt_path {checkpoint_dir}/ckpt",
@@ -283,8 +238,8 @@ def build_openrlhf_command(cfg: dict, dataset_path: str, reward_func_path: str) 
     if cfg.get('use_wandb', False):
         cmd_parts.extend([
             f"--use_wandb {cfg.get('wandb_token', 'true')}",
-            f"--wandb_project {cfg.get('wandb_project', 'tig-openrlhf')}",
-            f"--wandb_run_name {cfg.get('wandb_run_name', 'tig-grpo')}",
+            f"--wandb_project {cfg.get('wandb_project', 'openrlhf')}",
+            f"--wandb_run_name {cfg.get('wandb_run_name', 'grpo')}",
         ])
 
     return " \\\n   ".join(cmd_parts)
@@ -324,19 +279,19 @@ def main():
     print("="*60 + "\n")
 
     # Load and prepare dataset
-    dataset = load_tig_dataset(
-        cfg.get('dataset_path', 'data'),
-        cfg.get('max_data_per_task', 10000)
+    dataset = load_dataset(
+        cfg.get('dataset_path', 'dataset/openrlhf'),
+        cfg.get('max_data_per_task', 100_000)
     )
 
     # Save dataset for OpenRLHF
     dataset_output = save_dataset_for_openrlhf(
         dataset,
-        f"{cfg.get('checkpoint_dir', './checkpoints/tig-openrlhf')}/dataset.jsonl"
+        f"{cfg.get('checkpoint_dir', './checkpoints/openrlhf')}/dataset.jsonl"
     )
 
-    # Create reward function file
-    reward_func_path = create_reward_func_file()
+    # Get reward function file path
+    reward_func_path = get_reward_func_path()
 
     # Build training command
     cmd = build_openrlhf_command(cfg, dataset_output, reward_func_path)
