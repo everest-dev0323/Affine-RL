@@ -98,6 +98,9 @@ logging_steps: 1
 report_to:
   - wandb
 
+# Wandb settings
+run_name: r1_grpo_4b_run1
+
 save_strategy: steps
 save_steps: 50
 save_total_limit: 3

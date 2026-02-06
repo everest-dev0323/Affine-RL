@@ -283,10 +283,34 @@ def compute_game_reward(
     Returns:
         float: Reward score (0.0 to 1.0)
     """
-    if task == "othello" or task == "hex":
+    # Handle othello and hex (including hex_5, hex_7, hex_9, hex_11)
+    task_lower = task.lower() if task else ""
+    if task_lower == "othello" or task_lower.startswith("hex"):
         probabilities = extra_data.get("probabilities", {})
-        if parsed_response in probabilities:
-            return probabilities[parsed_response] / max(probabilities.values())
+
+        if not probabilities:
+            logger.debug(f"No probabilities found for {task}, using exact match")
+            return 1.0 if parsed_response.strip() == label.strip() else 0.0
+
+        # Filter out None values from probabilities
+        valid_probs = {k: v for k, v in probabilities.items() if v is not None}
+
+        if not valid_probs:
+            logger.debug(f"All probabilities are None for {task}, using exact match")
+            return 1.0 if parsed_response.strip() == label.strip() else 0.0
+
+        # Try to find the response in probabilities (handle both string and int keys)
+        prob_value = None
+        if parsed_response in valid_probs:
+            prob_value = valid_probs[parsed_response]
+        elif parsed_response.isdigit() and int(parsed_response) in valid_probs:
+            prob_value = valid_probs[int(parsed_response)]
+
+        if prob_value is not None:
+            max_prob = max(valid_probs.values())
+            if max_prob > 0:
+                return float(prob_value) / float(max_prob)
+            return 0.0
         return 0.0
 
     # Default: exact match
@@ -404,6 +428,16 @@ def reward_func(prompts, completions, label=None, env=None, task=None, extra_dat
                 task=task_i,
                 extra_data=extra
             )
+
+            # Handle None reward (shouldn't happen, but defensive)
+            if reward is None:
+                logger.warning(
+                    f"compute_reward returned None - env: {env_i}, task: {task_i}, "
+                    f"label: {label_i[:50] if label_i else 'None'}..., "
+                    f"response: {response[:50] if response else 'None'}..."
+                )
+                reward = 0.0
+
             rewards.append(float(reward))
 
             # Log successful completions occasionally
@@ -416,7 +450,13 @@ def reward_func(prompts, completions, label=None, env=None, task=None, extra_dat
                     f.write(f"Response: {parse_response(response)}\n")
 
         except Exception as e:
-            logger.warning(f"Error computing reward: {e}")
+            logger.warning(
+                f"Error computing reward: {e} - "
+                f"env: {env_i if 'env_i' in dir() else 'unknown'}, "
+                f"task: {task_i if 'task_i' in dir() else 'unknown'}, "
+                f"label: {(label_i[:50] + '...') if 'label_i' in dir() and label_i else 'unknown'}, "
+                f"response: {(response[:50] + '...') if 'response' in dir() and response else 'unknown'}"
+            )
             rewards.append(0.0)
 
     return rewards
