@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import torch
 import pyarrow.parquet as pq
 import pyarrow as pa
@@ -334,60 +335,55 @@ def compute_reward(
     return 1.0 if parsed_response.strip() == label.strip() else 0.0
 
 
-def reward_func(completions, prompts, labels, **kwargs):
+def reward_func(prompts, completions, label=None, env=None, task=None, extra_data=None, **kwargs):
     """
-    Main reward function for GRPO training (OpenRLHF-style).
+    Main reward function for GRPO training (TRL-style).
 
-    This function computes rewards and returns a dict with rewards tensor
-    and extra logging metrics, matching the OpenRLHF interface.
+    TRL's GRPOTrainer calls reward functions with:
+    - prompts: List of original prompts
+    - completions: List of model completions (response only, not including prompt)
+    - Additional columns from the dataset are passed as keyword arguments
 
     Args:
-        completions: List of model completions (full text: prompt + response)
         prompts: List of original prompts
-        labels: List of ground truth labels
-        **kwargs: Additional arguments including:
-            - envs: List[str] - Environment names (lgc-v2, game, print, etc.)
-            - tasks: List[str] - Task names
-            - extra_data: List[dict] - Additional metadata
+        completions: List of model completions (response text)
+        label: List of ground truth labels (from dataset column)
+        env: List of environment names (from dataset column)
+        task: List of task names (from dataset column)
+        extra_data: List of extra data JSON strings (from dataset column)
+        **kwargs: Additional arguments
 
     Returns:
-        dict with:
-            - rewards: torch.Tensor of reward scores
-            - scores: torch.Tensor of scores (same as rewards, for dynamic filtering)
-            - extra_logs: dict with logging metrics
+        List of float rewards (TRL expects a list, not a tensor)
     """
     batch_size = len(completions)
     rewards = []
 
-    # Extract extra data from kwargs
-    envs = kwargs.get("envs", [""] * batch_size)
-    tasks = kwargs.get("tasks", [""] * batch_size)
-    extra_data_list = kwargs.get("extra_data", [{}] * batch_size)
+    # Handle None values with defaults
+    labels = label if label is not None else [""] * batch_size
+    envs = env if env is not None else [""] * batch_size
+    tasks = task if task is not None else [""] * batch_size
+    extra_data_list = extra_data if extra_data is not None else ["{}"] * batch_size
 
     # Ensure lists match batch size
+    if len(labels) != batch_size:
+        labels = [labels[0] if labels else ""] * batch_size
     if len(envs) != batch_size:
         envs = [envs[0] if envs else ""] * batch_size
     if len(tasks) != batch_size:
         tasks = [tasks[0] if tasks else ""] * batch_size
     if len(extra_data_list) != batch_size:
-        extra_data_list = [extra_data_list[0] if extra_data_list else {}] * batch_size
-
-    # Track rewards by (env, task) for logging
-    env_task_rewards = {}
+        extra_data_list = [extra_data_list[0] if extra_data_list else "{}"] * batch_size
 
     for i in range(batch_size):
         try:
-            # Extract response (remove prompt from full completion if present)
-            completion = completions[i]
-            prompt = prompts[i] if prompts else ""
-            if prompt and completion.startswith(prompt):
-                response = completion[len(prompt):].strip()
-            else:
-                response = completion
+            # TRL passes completions as response only (not including prompt)
+            response = completions[i]
 
-            label = labels[i] if labels else ""
-            env = envs[i] if isinstance(envs[i], str) else str(envs[i])
-            task = tasks[i] if isinstance(tasks[i], str) else str(tasks[i])
+            label_i = labels[i] if labels[i] else ""
+            env_i = envs[i] if isinstance(envs[i], str) else str(envs[i])
+            task_i = tasks[i] if isinstance(tasks[i], str) else str(tasks[i])
+
             # Parse extra_data from JSON string if needed
             extra_raw = extra_data_list[i]
             if isinstance(extra_raw, dict):
@@ -403,63 +399,27 @@ def reward_func(completions, prompts, labels, **kwargs):
             # Compute reward using the unified compute_reward function
             reward = compute_reward(
                 response=response,
-                label=label,
-                env=env,
-                task=task,
+                label=label_i,
+                env=env_i,
+                task=task_i,
                 extra_data=extra
             )
-            rewards.append(reward)
-
-            # Track by (env, task)
-            key = (env, task)
-            if key not in env_task_rewards:
-                env_task_rewards[key] = []
-            env_task_rewards[key].append(reward)
+            rewards.append(float(reward))
 
             # Log successful completions occasionally
-            if reward > 0.5 and random.random() < 0.05:
+            if reward > 0.5 and random.random() < 0.01:
                 os.makedirs("completion_samples", exist_ok=True)
                 log_file = os.path.join("completion_samples", "success_samples.txt")
                 with open(log_file, "a") as f:
                     f.write(f"\n{'='*50}\n")
-                    f.write(f"Env: {env}, Task: {task}, Label: {label}, Reward: {reward}\n")
+                    f.write(f"Env: {env_i}, Task: {task_i}, Label: {label_i}, Reward: {reward}\n")
                     f.write(f"Response: {parse_response(response)}\n")
 
         except Exception as e:
             logger.warning(f"Error computing reward: {e}")
             rewards.append(0.0)
 
-    # Convert to tensor
-    reward_tensor = torch.tensor(rewards, dtype=torch.float32)
-
-    # Build extra logs
-    extra_logs = {
-        "mean_reward": reward_tensor.mean().item(),
-        "reward_std": reward_tensor.std().item() if len(rewards) > 1 else 0.0,
-        "num_correct": sum(1 for r in rewards if r == 1.0),
-        "accuracy": sum(rewards) / len(rewards) if rewards else 0.0,
-    }
-
-    # Add per (env, task) stats
-    for (env_name, task_name), reward_list in env_task_rewards.items():
-        # Create key: "env/task" or just "env" or "task" if one is empty
-        if env_name and task_name:
-            key = f"{env_name}/{task_name}"
-        elif env_name:
-            key = env_name
-        elif task_name:
-            key = task_name
-        else:
-            key = "unknown"
-
-        extra_logs[f"{key}_accuracy"] = sum(reward_list) / len(reward_list)
-        extra_logs[f"{key}_count"] = len(reward_list)
-
-    return {
-        "rewards": reward_tensor,  # Used for advantage calculation
-        "scores": reward_tensor,   # Used for dynamic filtering (DAPO)
-        "extra_logs": extra_logs,
-    }
+    return rewards
 
 # ============================================================================
 # Dataset Loading
@@ -515,23 +475,28 @@ def load_datasets(
     weights = []
     dataset_names = []
 
-    def normalize_row(row: dict) -> dict:
-        """Normalize a row to have consistent schema: prompt, label, env, task, extra_data (as JSON string)."""
-        normalized = {
-            "prompt": str(row.get("prompt", "")),
-            "label": str(row.get("label", "")),
-            "env": row.get("env", ""),
-            "task": row.get("task", ""),
-        }
-        # Convert extra_data to JSON string if it exists and is not already a string
-        extra = row.get("extra_data", {})
+    def normalize_extra_data(extra):
+        """Convert extra_data to JSON string, handling numpy arrays."""
         if extra is None:
-            normalized["extra_data"] = "{}"
+            return "{}"
         elif isinstance(extra, str):
-            normalized["extra_data"] = extra
+            return extra
         else:
-            normalized["extra_data"] = json.dumps(extra)
-        return normalized
+            # Convert numpy arrays to lists recursively
+            def convert_numpy(obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_numpy(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [convert_numpy(item) for item in obj]
+                elif isinstance(obj, (np.integer, np.floating)):
+                    return obj.item()  # Convert numpy scalars to Python types
+                else:
+                    return obj
+
+            converted = convert_numpy(extra)
+            return json.dumps(converted)
 
     # Iterate through all configured datasets
     for dataset_key, weight in DATASET_WEIGHTS.items():
@@ -541,18 +506,32 @@ def load_datasets(
             try:
                 # Read parquet with PyArrow
                 table = pq.read_table(parquet_path)
+                total_rows = len(table)
+
+                # Convert to pandas first (handles string_view conversion automatically)
                 df = table.to_pandas()
 
-                # Limit samples per file if specified
-                if max_samples_per_file is not None and len(df) > max_samples_per_file:
+                # Limit samples per file if specified (sample after converting to pandas)
+                if max_samples_per_file is not None and total_rows > max_samples_per_file:
                     df = df.sample(n=max_samples_per_file, random_state=42)
-                    logger.info(f"  Sampled {max_samples_per_file} from {len(table)} rows")
+                    logger.info(f"  Sampled {max_samples_per_file} from {total_rows} rows")
 
-                # Normalize each row to have consistent schema
-                normalized_rows = [normalize_row(row) for _, row in df.iterrows()]
+                # Vectorized normalization (much faster than iterrows)
+                normalized_df = {
+                    "prompt": df["prompt"].astype(str) if "prompt" in df.columns else [""] * len(df),
+                    "label": df["label"].astype(str) if "label" in df.columns else [""] * len(df),
+                    "env": df["env"].astype(str) if "env" in df.columns else [""] * len(df),
+                    "task": df["task"].astype(str) if "task" in df.columns else [""] * len(df),
+                }
 
-                # Create dataset with consistent schema
-                ds = Dataset.from_list(normalized_rows)
+                # Handle extra_data column
+                if "extra_data" in df.columns:
+                    normalized_df["extra_data"] = df["extra_data"].apply(normalize_extra_data)
+                else:
+                    normalized_df["extra_data"] = ["{}"] * len(df)
+
+                # Create dataset directly from dict (faster than from_list)
+                ds = Dataset.from_dict(normalized_df)
                 datasets_list.append(ds)
                 weights.append(weight)
                 dataset_names.append(dataset_key)
