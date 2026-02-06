@@ -58,15 +58,13 @@ class ScriptArguments:
     """Arguments for the GRPO training script."""
 
     dataset_path: str = field(
-        default="dataset/grpo",
-        metadata={"help": "Directory containing dataset files (othello.jsonl, hex.jsonl, etc.)"}
+        default="dataset/Upload",
+        metadata={"help": "Directory containing GAME/, LGC/, PRINT/ subdirectories with parquet files"}
     )
     max_samples: Optional[int] = field(
         default=None,
         metadata={"help": "Maximum number of samples to use (None for all)"}
     )
-    othello_weight: float = field(default=1.0, metadata={"help": "Weight for othello dataset"})
-    hex_weight: float = field(default=1.0, metadata={"help": "Weight for hex dataset"})
 
 
 # ============================================================================
@@ -280,7 +278,7 @@ def compute_game_reward(
     if task == "othello":
         probabilities = extra_data.get("probabilities", {})
         if parsed_response in probabilities:
-            return probabilities[parsed_response]
+            return probabilities[parsed_response] / max(probabilities.values())
         return 0.0
     
     # TODO: Implement custom reward logic for openspiel tasks
@@ -452,47 +450,71 @@ def reward_func(completions, prompts, labels, **kwargs):
 # Dataset Loading
 # ============================================================================
 
+# Dataset weights configuration (placeholder values - update as needed)
+DATASET_WEIGHTS = {
+    # GAME datasets
+    "GAME/gin_rummy": 0.05,
+    "GAME/goofspiel": 0.05,
+    "GAME/leduc_poker": 0.1,
+    "GAME/liars_dice_1": 0.1,
+    "GAME/liars_dice_2": 0.03,
+    "GAME/othello": 1.5,
+    "GAME/hex_5": 0.3,
+    "GAME/hex_7": 0.35,
+    "GAME/hex_9": 0.4,
+    "GAME/hex_11": 0.45,
+    # LGC datasets
+    "LGC/boolean_expressions": 0.1,
+    "LGC/cryptarithm": 0.1,
+    "LGC/dyck_language": 0.1,
+    "LGC/dyck_language2": 0.15,
+    "LGC/dyck_language_reasoning_errors": 0.1,
+    "LGC/game_of_24": 0.1,
+    "LGC/operation": 0.1,
+    "LGC/sudoku": 0.3,
+    # PRINT datasets
+    "PRINT/print": 0.3,
+}
+
+
 def load_datasets(
     dataset_path: str,
     max_samples: Optional[int] = None,
 ) -> Dataset:
     """
-    Load and merge datasets from directory using HuggingFace datasets.
+    Load and merge all parquet datasets from dataset/Upload directory.
 
-    Loads othello.jsonl and hex.jsonl from dataset_path directory
+    Loads all parquet files from GAME/, LGC/, and PRINT/ subdirectories
     and merges them with specified weights.
 
     Args:
-        dataset_path: Directory containing othello.jsonl and hex.jsonl
+        dataset_path: Directory containing GAME/, LGC/, PRINT/ subdirectories
         max_samples: Maximum total samples (None for all)
 
     Returns:
         Merged Dataset
     """
-    othello_weight = 1.0
-    hex_weight = 1.0
-    
     datasets_list = []
     weights = []
+    dataset_names = []
 
-    # Load othello dataset
-    othello_path = os.path.join(dataset_path, "othello.jsonl")
-    if os.path.exists(othello_path):
-        othello_ds = hf_load_dataset("json", data_files=othello_path, split="train")
-        datasets_list.append(othello_ds)
-        weights.append(othello_weight)
-        logger.info(f"Loaded othello dataset: {len(othello_ds)} samples (weight={othello_weight})")
+    # Iterate through all configured datasets
+    for dataset_key, weight in DATASET_WEIGHTS.items():
+        parquet_path = os.path.join(dataset_path, f"{dataset_key}.parquet")
 
-    # Load hex dataset
-    hex_path = os.path.join(dataset_path, "hex.jsonl")
-    if os.path.exists(hex_path):
-        hex_ds = hf_load_dataset("json", data_files=hex_path, split="train")
-        datasets_list.append(hex_ds)
-        weights.append(hex_weight)
-        logger.info(f"Loaded hex dataset: {len(hex_ds)} samples (weight={hex_weight})")
+        if os.path.exists(parquet_path):
+            ds = hf_load_dataset("parquet", data_files=parquet_path, split="train")
+            datasets_list.append(ds)
+            weights.append(weight)
+            dataset_names.append(dataset_key)
+            logger.info(f"Loaded {dataset_key}: {len(ds)} samples (weight={weight})")
+        else:
+            logger.warning(f"Dataset not found: {parquet_path}")
 
     if not datasets_list:
         raise ValueError(f"No datasets found in {dataset_path}")
+
+    logger.info(f"Total datasets loaded: {len(datasets_list)}")
 
     # Merge datasets with weights
     if len(datasets_list) == 1:
@@ -502,7 +524,9 @@ def load_datasets(
         total_weight = sum(weights)
         probs = [w / total_weight for w in weights]
         merged = interleave_datasets(datasets_list, probabilities=probs, seed=42)
-        logger.info(f"Merged datasets with probabilities: {probs}")
+        logger.info(f"Merged {len(datasets_list)} datasets with probabilities:")
+        for name, prob in zip(dataset_names, probs):
+            logger.info(f"  {name}: {prob:.4f}")
 
     # Limit samples if specified
     if max_samples is not None:

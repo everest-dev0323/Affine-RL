@@ -63,15 +63,15 @@ weight_decay: 0.01
 max_grad_norm: 1.0
 
 # Training duration
-max_steps: 1000
+max_steps: 10000
 # num_train_epochs: 1  # Alternative to max_steps
 
 # ----------------------------------------------------------------------------
 # GRPO Specific Parameters
 # ----------------------------------------------------------------------------
 beta: 0.001  # KL penalty coefficient
-max_prompt_length: 8192
-max_completion_length: 8192
+max_prompt_length: 16384
+max_completion_length: 16384
 num_generations: 8  # Number of completions per prompt
 
 # vLLM for fast generation (server mode - run separately)
