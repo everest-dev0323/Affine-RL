@@ -48,7 +48,7 @@ bf16: true
 # Batch size (effective batch = per_device * gradient_accum * num_gpus)
 # 8 x H100: per_device=1, grad_accum=4, num_gpus=8 -> effective=32
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 2
 
 # Gradient checkpointing (saves memory)
 gradient_checkpointing: true

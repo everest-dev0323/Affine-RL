@@ -275,13 +275,11 @@ def compute_game_reward(
     Returns:
         float: Reward score (0.0 to 1.0)
     """
-    if task == "othello":
+    if task == "othello" or task == "hex":
         probabilities = extra_data.get("probabilities", {})
         if parsed_response in probabilities:
             return probabilities[parsed_response] / max(probabilities.values())
         return 0.0
-    
-    # TODO: Implement custom reward logic for openspiel tasks
 
     # Default: exact match
     return 1.0 if parsed_response.strip() == label.strip() else 0.0
