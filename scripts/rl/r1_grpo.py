@@ -20,16 +20,18 @@ import os
 import random
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import pyarrow.parquet as pq
 import pyarrow as pa
 from datasets import Dataset, load_dataset as hf_load_dataset, interleave_datasets
+from transformers import TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer, ModelConfig, TrlParser, get_peft_config
 
@@ -55,6 +57,239 @@ logger.addHandler(handler)
 
 
 # ============================================================================
+# Per-Task Reward Tracking
+# ============================================================================
+
+class PerTaskRewardTracker:
+    """
+    Tracks rewards and completion lengths per (env, task) combination for wandb logging.
+    Uses cumulative sample count as x-axis for each task.
+    """
+
+    def __init__(self):
+        # {(env, task): [rewards]} - stores rewards since last log
+        self.rewards: Dict[Tuple[str, str], List[float]] = defaultdict(list)
+        # {(env, task): [lengths]} - stores completion lengths since last log
+        self.lengths: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+        # {(env, task): cumulative_count} - total samples seen per task (x-axis)
+        self.cumulative_samples: Dict[Tuple[str, str], int] = defaultdict(int)
+        # {(env, task): sum_rewards} - for running average
+        self.sum_rewards: Dict[Tuple[str, str], float] = defaultdict(float)
+        # {(env, task): sum_lengths} - for running average
+        self.sum_lengths: Dict[Tuple[str, str], int] = defaultdict(int)
+        # Track which metrics have been defined in wandb
+        self._defined_metrics: set = set()
+        self._wandb = None
+        # Try to import wandb
+        try:
+            import wandb
+            self._wandb = wandb
+        except ImportError:
+            pass
+        # {(env, task): last_sample_details} - stores last sample for debug logging
+        self.last_samples: Dict[Tuple[str, str], Dict] = {}
+
+    def _get_task_key(self, env: str, task: str) -> str:
+        """Get hierarchical key for env/task."""
+        if env and task:
+            return f"{env}/{task}"
+        elif env:
+            return env
+        elif task:
+            return task
+        return "unknown"
+
+    def _define_wandb_metric(self, task_key: str):
+        """Define custom x-axis metric in wandb for a task."""
+        if self._wandb is None or self._wandb.run is None:
+            return
+        if task_key in self._defined_metrics:
+            return
+
+        # Define metrics with custom x-axis (samples count)
+        samples_metric = f"samples/{task_key}"
+        self._wandb.define_metric(samples_metric)
+        self._wandb.define_metric(f"reward/{task_key}", step_metric=samples_metric)
+        self._wandb.define_metric(f"reward/{task_key}_avg", step_metric=samples_metric)
+        self._wandb.define_metric(f"length/{task_key}", step_metric=samples_metric)
+        self._wandb.define_metric(f"length/{task_key}_avg", step_metric=samples_metric)
+        self._defined_metrics.add(task_key)
+        logger.info(f"Defined wandb metrics for {task_key} with x-axis: {samples_metric}")
+
+    def add_reward(
+        self,
+        env: str,
+        task: str,
+        reward: float,
+        completion_length: int = 0,
+        sample_details: Optional[Dict] = None
+    ):
+        """Add a reward and completion length for a specific env/task combination."""
+        key = (env, task)
+        self.rewards[key].append(reward)
+        self.sum_rewards[key] += reward
+        if completion_length > 0:
+            self.lengths[key].append(completion_length)
+            self.sum_lengths[key] += completion_length
+        # Store last sample details for debug logging
+        if sample_details is not None:
+            self.last_samples[key] = sample_details
+
+    def get_stats_and_clear(self) -> Tuple[Dict[str, Dict[str, float]], Dict[str, int], Dict[str, Dict]]:
+        """
+        Get statistics for all tracked tasks and clear the batch rewards/lengths.
+        Returns:
+            - task_stats: {task_key: {metric_name: value}}
+            - sample_counts: {task_key: cumulative_sample_count}
+            - last_samples: {task_key: sample_details} for debug logging
+        """
+        task_stats = {}
+        sample_counts = {}
+        last_samples = {}
+
+        for (env, task), reward_list in self.rewards.items():
+            if reward_list:
+                key = self._get_task_key(env, task)
+
+                # Update cumulative sample count
+                batch_count = len(reward_list)
+                self.cumulative_samples[(env, task)] += batch_count
+                cumulative = self.cumulative_samples[(env, task)]
+
+                # Define wandb metric if not already defined
+                self._define_wandb_metric(key)
+
+                # Current batch reward stats
+                batch_avg_reward = sum(reward_list) / len(reward_list)
+
+                # Running average reward
+                running_avg_reward = self.sum_rewards[(env, task)] / cumulative
+
+                # Completion length stats
+                length_list = self.lengths.get((env, task), [])
+                batch_avg_length = sum(length_list) / len(length_list) if length_list else 0
+                running_avg_length = self.sum_lengths[(env, task)] / cumulative if cumulative > 0 else 0
+
+                task_stats[key] = {
+                    "reward": batch_avg_reward,
+                    "reward_avg": running_avg_reward,
+                    "length": batch_avg_length,
+                    "length_avg": running_avg_length,
+                }
+                sample_counts[key] = cumulative
+
+                # Get last sample for debug logging
+                if (env, task) in self.last_samples:
+                    last_samples[key] = self.last_samples[(env, task)]
+
+        # Clear batch data
+        self.rewards.clear()
+        self.lengths.clear()
+        self.last_samples.clear()
+        return task_stats, sample_counts, last_samples
+
+
+class PerTaskRewardCallback(TrainerCallback):
+    """
+    Callback to log per-task rewards and completion lengths to wandb.
+    Uses cumulative sample count as x-axis for each task.
+
+    Logs metrics like:
+    - reward/game/othello vs samples/game/othello
+    - length/game/hex vs samples/game/hex
+
+    In debug mode, also logs full sample details (prompt, label, completion, etc.)
+    """
+
+    def __init__(self, tracker: PerTaskRewardTracker, debug_mode: bool = False):
+        self.tracker = tracker
+        self.debug_mode = debug_mode
+        self._last_logged_step = -1
+        self._wandb = None
+        try:
+            import wandb
+            self._wandb = wandb
+        except ImportError:
+            logger.warning("wandb not available, per-task metrics will only be logged to CLI")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Log per-task rewards and lengths when trainer logs."""
+        # Avoid duplicate logging for the same step
+        if state.global_step == self._last_logged_step:
+            return
+        self._last_logged_step = state.global_step
+
+        # Get stats and clear batch
+        task_stats, sample_counts, last_samples = self.tracker.get_stats_and_clear()
+        if not task_stats:
+            return
+
+        # Log to wandb with custom x-axis per task
+        if self._wandb is not None and self._wandb.run is not None:
+            for task_key, stats in task_stats.items():
+                # Log each task's metrics with its own sample count as x-axis
+                log_dict = {
+                    f"samples/{task_key}": sample_counts[task_key],
+                    f"reward/{task_key}": stats["reward"],
+                    f"reward/{task_key}_avg": stats["reward_avg"],
+                }
+                if stats["length"] > 0:
+                    log_dict[f"length/{task_key}"] = stats["length"]
+                    log_dict[f"length/{task_key}_avg"] = stats["length_avg"]
+
+                self._wandb.log(log_dict)
+
+        # Also print summary to CLI
+        logger.info(f"Per-task stats (step {state.global_step}):")
+        for task_key in sorted(task_stats.keys()):
+            stats = task_stats[task_key]
+            samples = sample_counts[task_key]
+            logger.info(
+                f"  {task_key}: reward={stats['reward']:.4f} (avg={stats['reward_avg']:.4f}), "
+                f"length={stats['length']:.1f}, samples={samples}"
+            )
+
+        # Debug mode: log full sample details for each task
+        if self.debug_mode and last_samples:
+            logger.info(f"\n{'='*80}")
+            logger.info(f"DEBUG: Sample details per task (step {state.global_step})")
+            logger.info(f"{'='*80}")
+            for task_key in sorted(last_samples.keys()):
+                sample = last_samples[task_key]
+                logger.info(f"\n--- {task_key} ---")
+                logger.info(f"Reward: {sample.get('reward', 'N/A')}")
+                logger.info(f"Label: {sample.get('label', 'N/A')}")
+
+                # Log extra_data keys and values (truncated if too long)
+                extra_data = sample.get('extra_data', {})
+                if extra_data:
+                    extra_str = json.dumps(extra_data, indent=2, default=str)
+                    if len(extra_str) > 1000:
+                        extra_str = extra_str[-1000:] + "... (truncated)"
+                    logger.info(f"Extra data: {extra_str}")
+
+                # Log prompt (truncated)
+                prompt = sample.get('prompt', '')
+                if len(prompt) > 1000:
+                    prompt = prompt[-1000:] + "... (truncated)"
+                logger.info(f"Prompt:\n{prompt}")
+
+                # Log completion (truncated)
+                completion = sample.get('completion', '')
+                if len(completion) > 1000:
+                    completion = completion[-1000:] + "... (truncated)"
+                logger.info(f"Completion:\n{completion}")
+            logger.info(f"{'='*80}\n")
+
+
+# Global tracker instance (will be used by reward_func and callback)
+reward_tracker = PerTaskRewardTracker()
+
+# Debug mode flag (set via environment variable or script argument)
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "0").lower() in ("1", "true", "yes")
+
+
+# ============================================================================
 # Script Arguments
 # ============================================================================
 @dataclass
@@ -72,6 +307,10 @@ class ScriptArguments:
     max_samples_per_file: Optional[int] = field(
         default=None,
         metadata={"help": "Maximum samples to load per parquet file (None for all)"}
+    )
+    debug_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable debug mode to log sample details per task"}
     )
 
 
@@ -440,6 +679,23 @@ def reward_func(prompts, completions, label=None, env=None, task=None, extra_dat
 
             rewards.append(float(reward))
 
+            # Track reward and completion length per task for wandb logging
+            completion_length = len(response) if response else 0
+
+            # Build sample details for debug logging
+            sample_details = None
+            if DEBUG_MODE:
+                prompt_i = prompts[i] if i < len(prompts) else ""
+                sample_details = {
+                    "prompt": prompt_i,
+                    "label": label_i,
+                    "completion": response,
+                    "reward": float(reward),
+                    "extra_data": extra,
+                }
+
+            reward_tracker.add_reward(env_i, task_i, float(reward), completion_length, sample_details)
+
             # Log successful completions occasionally
             if reward > 0.5 and random.random() < 0.01:
                 os.makedirs("completion_samples", exist_ok=True)
@@ -458,6 +714,9 @@ def reward_func(prompts, completions, label=None, env=None, task=None, extra_dat
                 f"response: {(response[:50] + '...') if 'response' in dir() and response else 'unknown'}"
             )
             rewards.append(0.0)
+            # Also track failed rewards (with 0 length since we may not have valid response)
+            if 'env_i' in dir() and 'task_i' in dir():
+                reward_tracker.add_reward(env_i, task_i, 0.0, 0, None)
 
     return rewards
 
@@ -595,10 +854,17 @@ def load_datasets(
         # Normalize weights to probabilities
         total_weight = sum(weights)
         probs = [w / total_weight for w in weights]
-        merged = interleave_datasets(datasets_list, probabilities=probs, seed=42)
-        logger.info(f"Merged {len(datasets_list)} datasets with probabilities:")
-        for name, prob in zip(dataset_names, probs):
-            logger.info(f"  {name}: {prob:.4f}")
+        # Use stopping_strategy="all_exhausted" to repeat smaller datasets
+        # This ensures datasets with fewer samples are upsampled to match the weighted distribution
+        merged = interleave_datasets(
+            datasets_list,
+            probabilities=probs,
+            seed=42,
+            stopping_strategy="all_exhausted"
+        )
+        logger.info(f"Merged {len(datasets_list)} datasets with probabilities (all_exhausted):")
+        for name, prob, ds in zip(dataset_names, probs, datasets_list):
+            logger.info(f"  {name}: {prob:.4f} ({len(ds)} samples)")
 
     # Limit samples if specified
     if max_samples is not None:
@@ -650,14 +916,23 @@ def grpo_function(
     logger.info(f"Train samples: {len(train_dataset)}")
 
     # -------------------------
-    # Initialize trainer
+    # Initialize trainer with per-task reward callback
     # -------------------------
+    # Enable debug mode from script args or environment variable
+    global DEBUG_MODE
+    DEBUG_MODE = script_args.debug_mode or DEBUG_MODE
+    if DEBUG_MODE:
+        logger.info("DEBUG MODE ENABLED: Will log sample details per task")
+
+    per_task_callback = PerTaskRewardCallback(reward_tracker, debug_mode=DEBUG_MODE)
+
     trainer = GRPOTrainer(
         model=model_args.model_name_or_path,
         reward_funcs=[reward_func],
         args=training_args,
         train_dataset=train_dataset,
         peft_config=get_peft_config(model_args),
+        callbacks=[per_task_callback],
     )
 
     # -------------------------
