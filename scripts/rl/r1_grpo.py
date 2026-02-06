@@ -14,6 +14,7 @@ Usage:
         scripts/rl/r1_grpo.py --config config/r1_grpo.yaml
 """
 
+import json
 import logging
 import os
 import random
@@ -25,6 +26,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
+import pyarrow.parquet as pq
+import pyarrow as pa
 from datasets import Dataset, load_dataset as hf_load_dataset, interleave_datasets
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer, ModelConfig, TrlParser, get_peft_config
@@ -63,7 +66,11 @@ class ScriptArguments:
     )
     max_samples: Optional[int] = field(
         default=None,
-        metadata={"help": "Maximum number of samples to use (None for all)"}
+        metadata={"help": "Maximum total samples after merging (None for all)"}
+    )
+    max_samples_per_file: Optional[int] = field(
+        default=None,
+        metadata={"help": "Maximum samples to load per parquet file (None for all)"}
     )
 
 
@@ -381,7 +388,17 @@ def reward_func(completions, prompts, labels, **kwargs):
             label = labels[i] if labels else ""
             env = envs[i] if isinstance(envs[i], str) else str(envs[i])
             task = tasks[i] if isinstance(tasks[i], str) else str(tasks[i])
-            extra = extra_data_list[i] if isinstance(extra_data_list[i], dict) else {}
+            # Parse extra_data from JSON string if needed
+            extra_raw = extra_data_list[i]
+            if isinstance(extra_raw, dict):
+                extra = extra_raw
+            elif isinstance(extra_raw, str):
+                try:
+                    extra = json.loads(extra_raw) if extra_raw else {}
+                except json.JSONDecodeError:
+                    extra = {}
+            else:
+                extra = {}
 
             # Compute reward using the unified compute_reward function
             reward = compute_reward(
@@ -478,6 +495,7 @@ DATASET_WEIGHTS = {
 def load_datasets(
     dataset_path: str,
     max_samples: Optional[int] = None,
+    max_samples_per_file: Optional[int] = None,
 ) -> Dataset:
     """
     Load and merge all parquet datasets from dataset/Upload directory.
@@ -487,7 +505,8 @@ def load_datasets(
 
     Args:
         dataset_path: Directory containing GAME/, LGC/, PRINT/ subdirectories
-        max_samples: Maximum total samples (None for all)
+        max_samples: Maximum total samples after merging (None for all)
+        max_samples_per_file: Maximum samples to load per parquet file (None for all)
 
     Returns:
         Merged Dataset
@@ -496,16 +515,52 @@ def load_datasets(
     weights = []
     dataset_names = []
 
+    def normalize_row(row: dict) -> dict:
+        """Normalize a row to have consistent schema: prompt, label, env, task, extra_data (as JSON string)."""
+        normalized = {
+            "prompt": str(row.get("prompt", "")),
+            "label": str(row.get("label", "")),
+            "env": row.get("env", ""),
+            "task": row.get("task", ""),
+        }
+        # Convert extra_data to JSON string if it exists and is not already a string
+        extra = row.get("extra_data", {})
+        if extra is None:
+            normalized["extra_data"] = "{}"
+        elif isinstance(extra, str):
+            normalized["extra_data"] = extra
+        else:
+            normalized["extra_data"] = json.dumps(extra)
+        return normalized
+
     # Iterate through all configured datasets
     for dataset_key, weight in DATASET_WEIGHTS.items():
         parquet_path = os.path.join(dataset_path, f"{dataset_key}.parquet")
 
         if os.path.exists(parquet_path):
-            ds = hf_load_dataset("parquet", data_files=parquet_path, split="train")
-            datasets_list.append(ds)
-            weights.append(weight)
-            dataset_names.append(dataset_key)
-            logger.info(f"Loaded {dataset_key}: {len(ds)} samples (weight={weight})")
+            try:
+                # Read parquet with PyArrow
+                table = pq.read_table(parquet_path)
+                df = table.to_pandas()
+
+                # Limit samples per file if specified
+                if max_samples_per_file is not None and len(df) > max_samples_per_file:
+                    df = df.sample(n=max_samples_per_file, random_state=42)
+                    logger.info(f"  Sampled {max_samples_per_file} from {len(table)} rows")
+
+                # Normalize each row to have consistent schema
+                normalized_rows = [normalize_row(row) for _, row in df.iterrows()]
+
+                # Create dataset with consistent schema
+                ds = Dataset.from_list(normalized_rows)
+                datasets_list.append(ds)
+                weights.append(weight)
+                dataset_names.append(dataset_key)
+                logger.info(f"Loaded {dataset_key}: {len(ds)} samples (weight={weight})")
+            except Exception as e:
+                logger.warning(f"Failed to load {dataset_key}: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             logger.warning(f"Dataset not found: {parquet_path}")
 
@@ -570,6 +625,7 @@ def grpo_function(
     train_dataset = load_datasets(
         dataset_path=script_args.dataset_path,
         max_samples=script_args.max_samples,
+        max_samples_per_file=script_args.max_samples_per_file,
     )
 
     logger.info(f"Train samples: {len(train_dataset)}")

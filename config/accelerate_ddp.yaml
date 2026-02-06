@@ -1,0 +1,18 @@
+# Accelerate config for TRL GRPOTrainer with vLLM colocate mode + DDP
+#
+# Usage:
+#   accelerate launch --config_file config/accelerate_deepspeed_zero3.yaml \
+#       scripts/rl/r1_grpo.py --config config/r1_grpo.yaml
+#
+# Note: DDP is recommended for models that fit on a single GPU (e.g., 4B models)
+# as it has lower communication overhead than DeepSpeed ZeRO-3.
+
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: MULTI_GPU
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8  # Adjust to number of GPUs
+same_network: true
+use_cpu: false
+

@@ -9,7 +9,7 @@
 # ----------------------------------------------------------------------------
 # Model Arguments
 # ----------------------------------------------------------------------------
-model_name_or_path: Qwen/Qwen2.5-3B-Instruct
+model_name_or_path: godninja/Affine-king_v1-5CkSCRSNNMrVy8bwAfuDWqLqNYAEc3shDJZUtQ4Rjboi2zFT
 model_revision: main
 torch_dtype: bfloat16
 attn_implementation: flash_attention_2
@@ -73,11 +73,12 @@ beta: 0.001  # KL penalty coefficient
 max_prompt_length: 16384
 max_completion_length: 16384
 num_generations: 8  # Number of completions per prompt
+generation_batch_size: 8  # Must be divisible by num_generations
 
 # vLLM for fast generation (colocate mode - weights synced with training)
 use_vllm: true
 vllm_mode: colocate
-vllm_gpu_memory_utilization: 0.7
+vllm_gpu_memory_utilization: 0.5
 vllm_enable_sleep_mode: true
 
 # Server mode (alternative - run vLLM separately, weights NOT synced)
