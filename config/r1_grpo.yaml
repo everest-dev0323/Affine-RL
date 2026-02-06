@@ -91,7 +91,7 @@ vllm_server_timeout: 300.0
 # Logging & Checkpointing
 # ----------------------------------------------------------------------------
 logging_strategy: steps
-logging_steps: 5
+logging_steps: 1
 report_to:
   - wandb
 
