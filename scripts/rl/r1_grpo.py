@@ -10,8 +10,8 @@ Supports:
 - print: Simple equality check environments
 
 Usage:
-    accelerate launch --num_processes 7 --config_file config/deepspeed_zero3.yaml \
-        scripts/rl/r1_grpo.py --config config/r1_grpo.yaml
+    accelerate launch --num_processes 2 --config_file config/accelerate_ddp.yaml \
+        scripts/rl/r1_grpo.py --config config/r1_grpo.yaml --debug_mode
 """
 
 import json
@@ -90,13 +90,11 @@ class PerTaskRewardTracker:
         self.last_samples: Dict[Tuple[str, str], Dict] = {}
 
     def _get_task_key(self, env: str, task: str) -> str:
-        """Get hierarchical key for env/task."""
-        if env and task:
-            return f"{env}/{task}"
+        """Get task key (without env prefix)."""
+        if task:
+            return task
         elif env:
             return env
-        elif task:
-            return task
         return "unknown"
 
     def _define_wandb_metric(self, task_key: str):
