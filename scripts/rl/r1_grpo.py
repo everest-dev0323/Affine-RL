@@ -107,12 +107,14 @@ class PerTaskRewardTracker:
             return
 
         # Define metrics with custom x-axis (samples count)
-        samples_metric = f"samples/{task_key}"
+        # Format: {task_key}/samples, {task_key}/reward, {task_key}/length
+        # This groups metrics by task in wandb (e.g., game/hex/reward, game/hex/length)
+        samples_metric = f"{task_key}/samples"
         self._wandb.define_metric(samples_metric)
-        self._wandb.define_metric(f"reward/{task_key}", step_metric=samples_metric)
-        self._wandb.define_metric(f"reward/{task_key}_avg", step_metric=samples_metric)
-        self._wandb.define_metric(f"length/{task_key}", step_metric=samples_metric)
-        self._wandb.define_metric(f"length/{task_key}_avg", step_metric=samples_metric)
+        self._wandb.define_metric(f"{task_key}/reward", step_metric=samples_metric)
+        self._wandb.define_metric(f"{task_key}/reward_avg", step_metric=samples_metric)
+        self._wandb.define_metric(f"{task_key}/length", step_metric=samples_metric)
+        self._wandb.define_metric(f"{task_key}/length_avg", step_metric=samples_metric)
         self._defined_metrics.add(task_key)
         logger.info(f"Defined wandb metrics for {task_key} with x-axis: {samples_metric}")
 
@@ -225,17 +227,19 @@ class PerTaskRewardCallback(TrainerCallback):
             return
 
         # Log to wandb with custom x-axis per task
+        # Format: {task_key}/samples, {task_key}/reward, {task_key}/length
+        # This groups metrics by task in wandb (e.g., game/hex/reward, game/hex/length)
         if self._wandb is not None and self._wandb.run is not None:
             for task_key, stats in task_stats.items():
                 # Log each task's metrics with its own sample count as x-axis
                 log_dict = {
-                    f"samples/{task_key}": sample_counts[task_key],
-                    f"reward/{task_key}": stats["reward"],
-                    f"reward/{task_key}_avg": stats["reward_avg"],
+                    f"{task_key}/samples": sample_counts[task_key],
+                    f"{task_key}/reward": stats["reward"],
+                    f"{task_key}/reward_avg": stats["reward_avg"],
                 }
                 if stats["length"] > 0:
-                    log_dict[f"length/{task_key}"] = stats["length"]
-                    log_dict[f"length/{task_key}_avg"] = stats["length_avg"]
+                    log_dict[f"{task_key}/length"] = stats["length"]
+                    log_dict[f"{task_key}/length_avg"] = stats["length_avg"]
 
                 self._wandb.log(log_dict)
 
