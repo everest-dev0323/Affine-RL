@@ -9,7 +9,7 @@
 # ----------------------------------------------------------------------------
 # Model Arguments
 # ----------------------------------------------------------------------------
-model_name_or_path: godninja/Affine-king_v1-5CkSCRSNNMrVy8bwAfuDWqLqNYAEc3shDJZUtQ4Rjboi2zFT
+model_name_or_path: tensorminer/Affine-5EEg3asikmXYbKk86gThAPrSyLG1ZnVZpMNkUJVd5UgU6cTU
 model_revision: main
 torch_dtype: bfloat16
 attn_implementation: flash_attention_2
@@ -46,9 +46,9 @@ output_dir: runs/grpo-othello
 bf16: true
 
 # Batch size (effective batch = per_device * gradient_accum * num_gpus)
-# 8 x H100: per_device=1, grad_accum=16, num_gpus=8 -> effective=128 (128/8=16 unique prompts per optimizer update and 1024/8=128 prompts per vllm/train switch turn)
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
+# 8 x H200: per_device=8, grad_accum=4, num_gpus=8 -> 256 samples per optimizer update (32 prompts), 16 optimizer updates per vllm/train switch turn
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 4
 
 # Gradient checkpointing (saves memory)
 gradient_checkpointing: true
@@ -73,7 +73,7 @@ beta: 0.001  # KL penalty coefficient
 max_prompt_length: 16384
 max_completion_length: 16384
 num_generations: 8  # Number of completions per prompt
-generation_batch_size: 1024  # 128 prompts × 8 completions
+generation_batch_size: 4096  # 512 prompts × 8 completions
 
 # vLLM for fast generation (colocate mode - weights synced with training)
 use_vllm: true
@@ -102,7 +102,7 @@ report_to:
 run_name: r1_grpo_4b_run1
 
 save_strategy: steps
-save_steps: 50
+save_steps: 100
 save_total_limit: 3
 
 seed: 42
