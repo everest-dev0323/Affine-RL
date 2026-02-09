@@ -46,9 +46,9 @@ output_dir: runs/grpo-othello
 bf16: true
 
 # Batch size (effective batch = per_device * gradient_accum * num_gpus)
-# 8 x H100: per_device=1, grad_accum=4, num_gpus=8 -> effective=32
+# 8 x H100: per_device=1, grad_accum=16, num_gpus=8 -> effective=128 (128/8=16 unique prompts per optimizer update and 1024/8=128 prompts per vllm/train switch turn)
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 16
 
 # Gradient checkpointing (saves memory)
 gradient_checkpointing: true
@@ -73,7 +73,7 @@ beta: 0.001  # KL penalty coefficient
 max_prompt_length: 16384
 max_completion_length: 16384
 num_generations: 8  # Number of completions per prompt
-generation_batch_size: 8  # Must be divisible by num_generations
+generation_batch_size: 1024  # 128 prompts × 8 completions
 
 # vLLM for fast generation (colocate mode - weights synced with training)
 use_vllm: true
