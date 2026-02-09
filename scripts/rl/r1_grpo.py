@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import pyarrow.parquet as pq
 import pyarrow as pa
 from datasets import Dataset, load_dataset as hf_load_dataset, interleave_datasets
@@ -194,9 +195,10 @@ class PerTaskRewardCallback(TrainerCallback):
     Callback to log per-task rewards and completion lengths to wandb.
     Uses cumulative sample count as x-axis for each task.
 
-    Logs metrics like:
-    - reward/game/othello vs samples/game/othello
-    - length/game/hex vs samples/game/hex
+    In multi-GPU training, gathers rewards from all GPUs and logs:
+    - {task_key}/reward_gpu0, {task_key}/reward_gpu1, ... (per-GPU rewards, 8 lines in one panel)
+    - {task_key}/reward_mean (average across all GPUs)
+    - {task_key}/reward_avg (running average)
 
     In debug mode, also logs full sample details (prompt, label, completion, etc.)
     """
@@ -212,6 +214,76 @@ class PerTaskRewardCallback(TrainerCallback):
         except ImportError:
             logger.warning("wandb not available, per-task metrics will only be logged to CLI")
 
+    def _gather_rewards_from_all_gpus(
+        self,
+        task_stats: Dict[str, Dict[str, float]],
+        sample_counts: Dict[str, int]
+    ) -> Tuple[Dict[str, List[float]], Dict[str, List[float]], Dict[str, int]]:
+        """
+        Gather rewards and lengths from all GPUs to rank 0.
+
+        Returns:
+            - all_rewards: {task_key: [reward_gpu0, reward_gpu1, ...]}
+            - all_lengths: {task_key: [length_gpu0, length_gpu1, ...]}
+            - total_samples: {task_key: total_samples_across_all_gpus}
+        """
+        if not dist.is_initialized():
+            # Single GPU - just return local stats
+            all_rewards = {k: [v["reward"]] for k, v in task_stats.items()}
+            all_lengths = {k: [v["length"]] for k, v in task_stats.items()}
+            return all_rewards, all_lengths, sample_counts
+
+        world_size = dist.get_world_size()
+
+        # Get all unique task keys across all processes
+        local_task_keys = list(task_stats.keys())
+        # Gather task keys from all processes
+        all_task_keys_list = [None] * world_size
+        dist.all_gather_object(all_task_keys_list, local_task_keys)
+        # Flatten and deduplicate
+        all_task_keys = sorted(set(k for keys in all_task_keys_list for k in keys))
+
+        all_rewards = {}
+        all_lengths = {}
+        total_samples = {}
+
+        for task_key in all_task_keys:
+            # Get local values (0 if this GPU didn't see this task)
+            local_reward = task_stats.get(task_key, {}).get("reward", 0.0)
+            local_length = task_stats.get(task_key, {}).get("length", 0.0)
+            local_samples = sample_counts.get(task_key, 0)
+            # Flag to indicate if this GPU has data for this task
+            has_data = 1.0 if task_key in task_stats else 0.0
+
+            # Create tensors for gathering
+            local_tensor = torch.tensor(
+                [local_reward, local_length, float(local_samples), has_data],
+                device="cuda"
+            )
+
+            # Gather from all GPUs
+            gathered_tensors = [torch.zeros(4, device="cuda") for _ in range(world_size)]
+            dist.all_gather(gathered_tensors, local_tensor)
+
+            # Extract rewards and lengths only from GPUs that have data
+            rewards_list = []
+            lengths_list = []
+            total_sample_count = 0
+
+            for tensor in gathered_tensors:
+                reward_val, length_val, sample_val, has_data_val = tensor.tolist()
+                if has_data_val > 0.5:  # This GPU has data for this task
+                    rewards_list.append(reward_val)
+                    lengths_list.append(length_val)
+                    total_sample_count += int(sample_val)
+
+            if rewards_list:  # Only include if at least one GPU has data
+                all_rewards[task_key] = rewards_list
+                all_lengths[task_key] = lengths_list
+                total_samples[task_key] = total_sample_count
+
+        return all_rewards, all_lengths, total_samples
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         """Log per-task rewards and lengths when trainer logs."""
         # Avoid duplicate logging for the same step
@@ -219,40 +291,73 @@ class PerTaskRewardCallback(TrainerCallback):
             return
         self._last_logged_step = state.global_step
 
-        # Get stats and clear batch
+        # Get local stats and clear batch
         task_stats, sample_counts, last_samples = self.tracker.get_stats_and_clear()
-        if not task_stats:
+
+        # Gather rewards from all GPUs
+        all_rewards, all_lengths, total_samples = self._gather_rewards_from_all_gpus(
+            task_stats, sample_counts
+        )
+
+        if not all_rewards:
             return
 
-        # Log to wandb with custom x-axis per task
-        # Format: {task_key}/samples, {task_key}/reward, {task_key}/length
-        # This groups metrics by task in wandb (e.g., game/hex/reward, game/hex/length)
-        if self._wandb is not None and self._wandb.run is not None:
-            for task_key, stats in task_stats.items():
-                # Log each task's metrics with its own sample count as x-axis
+        # Determine rank for logging
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        is_main_process = rank == 0
+
+        # Log to wandb (only on main process, but with all GPU data)
+        if is_main_process and self._wandb is not None and self._wandb.run is not None:
+            for task_key in all_rewards:
+                rewards = all_rewards[task_key]
+                lengths = all_lengths.get(task_key, [])
+                samples = total_samples.get(task_key, 0)
+
                 log_dict = {
-                    f"{task_key}/samples": sample_counts[task_key],
-                    f"{task_key}/reward": stats["reward"],
-                    f"{task_key}/reward_avg": stats["reward_avg"],
+                    f"{task_key}/samples": samples,
                 }
-                if stats["length"] > 0:
-                    log_dict[f"{task_key}/length"] = stats["length"]
-                    log_dict[f"{task_key}/length_avg"] = stats["length_avg"]
+
+                # Log per-GPU rewards (will show as multiple lines in same wandb panel)
+                for gpu_idx, reward in enumerate(rewards):
+                    log_dict[f"{task_key}/reward_gpu{gpu_idx}"] = reward
+
+                # Log mean reward across all GPUs
+                if rewards:
+                    log_dict[f"{task_key}/reward_mean"] = sum(rewards) / len(rewards)
+
+                # Log per-GPU lengths
+                for gpu_idx, length in enumerate(lengths):
+                    if length > 0:
+                        log_dict[f"{task_key}/length_gpu{gpu_idx}"] = length
+
+                # Log mean length across all GPUs
+                valid_lengths = [l for l in lengths if l > 0]
+                if valid_lengths:
+                    log_dict[f"{task_key}/length_mean"] = sum(valid_lengths) / len(valid_lengths)
+
+                # Also log running averages from local tracker (approximate)
+                if task_key in task_stats:
+                    log_dict[f"{task_key}/reward_avg"] = task_stats[task_key]["reward_avg"]
+                    if task_stats[task_key]["length_avg"] > 0:
+                        log_dict[f"{task_key}/length_avg"] = task_stats[task_key]["length_avg"]
 
                 self._wandb.log(log_dict)
 
-        # Also print summary to CLI
-        logger.info(f"Per-task stats (step {state.global_step}):")
-        for task_key in sorted(task_stats.keys()):
-            stats = task_stats[task_key]
-            samples = sample_counts[task_key]
-            logger.info(
-                f"  {task_key}: reward={stats['reward']:.4f} (avg={stats['reward_avg']:.4f}), "
-                f"length={stats['length']:.1f}, samples={samples}"
-            )
+        # Print summary to CLI (only on main process)
+        if is_main_process:
+            logger.info(f"Per-task stats (step {state.global_step}):")
+            for task_key in sorted(all_rewards.keys()):
+                rewards = all_rewards[task_key]
+                samples = total_samples.get(task_key, 0)
+                mean_reward = sum(rewards) / len(rewards) if rewards else 0
+                rewards_str = ", ".join(f"{r:.3f}" for r in rewards)
+                logger.info(
+                    f"  {task_key}: rewards=[{rewards_str}], mean={mean_reward:.4f}, "
+                    f"samples={samples}, n_gpus={len(rewards)}"
+                )
 
-        # Debug mode: log full sample details for each task
-        if self.debug_mode and last_samples:
+        # Debug mode: log full sample details for each task (only on main process)
+        if is_main_process and self.debug_mode and last_samples:
             logger.info(f"\n{'='*80}")
             logger.info(f"DEBUG: Sample details per task (step {state.global_step})")
             logger.info(f"{'='*80}")
