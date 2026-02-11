@@ -1,0 +1,35 @@
+# ============================================================================
+# Kimi K2.5 Inference Configuration (Post-SFT Verification)
+# ============================================================================
+#
+# Use this config to verify your fine-tuned LoRA adapter works correctly.
+# For production serving, use SGLang instead (see documentation).
+#
+# Usage (chat):
+#   llamafactory-cli chat scripts/sft/kimik25_kt_inference.yaml
+#
+# Usage (API server):
+#   API_PORT=8000 llamafactory-cli api scripts/sft/kimik25_kt_inference.yaml
+#
+# ============================================================================
+
+### Model Configuration
+model_name_or_path: moonshotai/Kimi-K2.5
+trust_remote_code: true
+
+### LoRA Adapter Path (from training output)
+# Point to your trained LoRA adapter directory
+adapter_name_or_path: outputs/kimi_k25_lora_sft
+
+### Template (must match training)
+template: chatml
+
+### Inference Backend
+infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
+
+### KTransformers Configuration
+use_kt: true
+kt_optimize_rule: examples/kt_optimize_rules/KimiK2.5-sft-amx-multi-gpu.yaml
+cpu_infer: 32
+chunk_size: 8192
+

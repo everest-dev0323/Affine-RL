@@ -1,0 +1,199 @@
+# ============================================================================
+# Kimi K2.5 LoRA SFT Configuration for KTransformers + LLaMA-Factory
+# ============================================================================
+#
+# This is the RECOMMENDED approach for fine-tuning Kimi K2.5 with limited VRAM.
+# Uses CPU-GPU heterogeneous computing via KTransformers kt-sft module.
+#
+# Hardware Requirements:
+# - GPU: 4× RTX 4090 24GB (or ~48GB+ total VRAM available)
+# - CPU: Intel CPU with AMX support (Sapphire Rapids or newer)
+# - RAM: At least 2TB system memory
+# - Storage: ~600GB for model weights
+#
+# Usage:
+#   USE_KT=1 llamafactory-cli train scripts/sft/kimik25_kt_lora.yaml
+#
+# For verification/chat after training:
+#   llamafactory-cli chat scripts/sft/kimik25_kt_lora_inference.yaml
+#
+# ============================================================================
+
+### Model Configuration
+model_name_or_path: moonshotai/Kimi-K2.5
+trust_remote_code: true
+flash_attn: fa2
+
+### Training Method
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### LoRA Configuration
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.1
+lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj  # Target all linear layers
+
+### Dataset Configuration
+# Replace with your dataset - supports HuggingFace datasets or local files
+dataset: identity  # Placeholder - replace with your dataset
+template: >
+  {%- macro render_content(msg) -%}
+    {%- set c = msg.get('content') -%}
+    {%- if c is string -%}
+      {{ c }}
+    {%- elif c is not none -%}
+      {%- for content in c -%}
+        {%- if content['type'] == 'image' or content['type'] == 'image_url' -%}
+          <|media_begin|>image<|media_content|><|media_pad|><|media_end|>
+        {%- elif content['type'] == 'video' or content['type'] == 'video_url' -%}
+          <|kimi_k25_video_placeholder|>
+        {%- else -%}
+          {{ content['text'] }}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+  {%- endmacro -%}
+  {%- macro set_roles(message) -%}
+    {%- set role_name = message.get('name') or message['role'] -%}
+    {%- if message['role'] == 'user' -%}
+      <|im_user|>{{ role_name }}<|im_middle|>
+    {%- elif message['role'] == 'assistant' -%}
+      <|im_assistant|>{{ role_name }}<|im_middle|>
+    {%- else -%}
+      <|im_system|>{{ role_name }}<|im_middle|>
+    {%- endif -%}
+  {%- endmacro -%}
+  {%- macro render_toolcalls(message) -%}
+    <|tool_calls_section_begin|>
+    {%- for tool_call in message['tool_calls'] -%}
+      {%- set formatted_id = tool_call['id'] -%}
+      <|tool_call_begin|>{{ formatted_id }}<|tool_call_argument_begin|>{% if tool_call['function']['arguments'] is string %}{{ tool_call['function']['arguments'] }}{% else %}{{ tool_call['function']['arguments'] | tojson }}{% endif %}<|tool_call_end|>
+    {%- endfor -%}
+    <|tool_calls_section_end|>
+  {%- endmacro -%}
+  {%- set ns = namespace(last_non_tool_call_assistant_msg=-1) -%}
+  {%- for idx in range(messages|length-1, -1, -1) -%}
+    {%- if messages[idx]['role'] == 'assistant' and not messages[idx].get('tool_calls') -%}
+      {%- set ns.last_non_tool_call_assistant_msg = idx -%}
+      {%- break -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set hist_msgs = messages[:ns.last_non_tool_call_assistant_msg] -%}
+  {%- set suffix_msgs = messages[ns.last_non_tool_call_assistant_msg:] -%}
+  {%- if tools -%}
+    {%- if tools_ts_str -%}
+      <|im_system|>tool_declare<|im_middle|>{{ tools_ts_str }}<|im_end|>
+    {%- else -%}
+      <|im_system|>tool_declare<|im_middle|>{{ tools | tojson(separators=(',', ':')) }}<|im_end|>
+    {%- endif -%}
+  {%- endif -%}
+  {%- for message in hist_msgs -%}
+    {{ set_roles(message) }}
+    {%- if message['role'] == 'assistant' -%}
+      <think></think>{{ render_content(message) }}
+      {%- if message.get('tool_calls') -%}
+        {{ render_toolcalls(message) }}
+      {%- endif -%}
+    {%- elif message['role'] == 'tool' -%}
+      {%- set tool_call_id = message.tool_call_id -%}
+      ## Return of {{ tool_call_id }}
+      {{ render_content(message) }}
+    {%- elif message['content'] is not none -%}
+      {{ render_content(message) }}
+    {%- endif -%}
+    <|im_end|>
+  {%- endfor -%}
+  {%- for message in suffix_msgs -%}
+    {{ set_roles(message) }}
+    {%- if message['role'] == 'assistant' -%}
+      {%- if thinking is defined and thinking is false -%}
+        <think></think>{{ render_content(message) }}
+      {%- else -%}
+        {%- set rc = message.get('reasoning_content', '') -%}
+        <think>{{ rc }}</think>{{ render_content(message) }}
+      {%- endif -%}
+      {%- if message.get('tool_calls') -%}
+        {{ render_toolcalls(message) }}
+      {%- endif -%}
+    {%- elif message['role'] == 'tool' -%}
+      {%- set tool_call_id = message.tool_call_id -%}
+      ## Return of {{ tool_call_id }}
+      {{ render_content(message) }}
+    {%- elif message['content'] is not none -%}
+      {{ render_content(message) }}
+    {%- endif -%}
+    <|im_end|>
+  {%- endfor -%}
+  {%- if add_generation_prompt -%}
+    <|im_assistant|>assistant<|im_middle|>
+    {%- if thinking is defined and thinking is false -%}
+      <think></think>
+    {%- else -%}
+      <think>
+    {%- endif -%}
+  {%- endif -%}
+
+cutoff_len: 24000   # Reduce for less memory, increase for longer context
+
+# KEY SETTINGS FOR YOUR REQUIREMENT
+mask_history: true      # Only compute loss on LAST assistant response
+train_on_prompt: false  # Don't compute loss on user/system (default)
+
+overwrite_cache: true
+preprocessing_num_workers: 8
+dataloader_num_workers: 4
+
+### Output Configuration
+output_dir: outputs/kimi_k25_lora_sft
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+overwrite_output_dir: true
+# save_only_model: false
+report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+run_name: kimi-k25-lora-sft
+
+### Training Hyperparameters
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16  # Effective batch size = 16
+learning_rate: 2.0e-5
+num_train_epochs: 2.0
+# lr_scheduler_type: cosine
+warmup_steps: 50
+bf16: true
+# ddp_timeout: 180000000
+# resume_from_checkpoint: null
+
+### KTransformers Configuration (CRITICAL for limited VRAM)
+use_kt: true  # Enable KTransformers as LoRA SFT backend
+kt_optimize_rule: examples/kt_optimize_rules/KimiK2.5-sft-amx-multi-gpu.yaml
+
+# CPU inference threads for MoE expert computation
+# Adjust based on your CPU core count (recommended: num_cores / 2)
+cpu_infer: 32
+
+# Chunk size for processing (affects memory usage)
+# Lower = less memory, Higher = faster (if you have enough memory)
+chunk_size: 8192
+
+# ============================================================================
+# KTransformers Placement Strategy Notes:
+# ============================================================================
+# The kt_optimize_rule file controls how model components are placed:
+# - Attention layers: GPU (fast, low memory)
+# - MoE experts: CPU with AMX acceleration (offloads majority of parameters)
+# - Dense layers: GPU
+#
+# This heterogeneous placement enables training 1T models on consumer hardware.
+#
+# Naming convention for optimize rules:
+# - *-sft-*: Strategy for fine-tuning (vs inference)
+# - *-amx-*: Use Intel AMX acceleration (recommended for Intel CPUs)
+# - *-multi-gpu-X*: Use X GPUs (default 2 if omitted)
+#
+# Example: KimiK2.5-sft-amx-multi-gpu.yaml = 
+#   Kimi K2.5 fine-tuning with AMX and 2-GPU model parallel
+# ============================================================================
+
