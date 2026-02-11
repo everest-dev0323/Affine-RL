@@ -10,7 +10,7 @@ Supports:
 - print: Simple equality check environments
 
 Usage:
-    accelerate launch --num_processes 2 --config_file config/accelerate_ddp.yaml \
+    accelerate launch --num_processes 8 --config_file config/accelerate_ddp.yaml \
         scripts/rl/r1_grpo.py --config config/r1_grpo.yaml --debug_mode
 """
 
@@ -188,6 +188,40 @@ class PerTaskRewardTracker:
         self.lengths.clear()
         self.last_samples.clear()
         return task_stats, sample_counts, last_samples
+
+
+class LRResetCallback(TrainerCallback):
+    """
+    Callback to reset learning rate when resuming from checkpoint.
+    This allows using a different LR scheduler (e.g., constant instead of cosine)
+    when continuing training from a checkpoint.
+    """
+
+    def __init__(self, target_lr: float, reset_scheduler: bool = True):
+        self.target_lr = target_lr
+        self.reset_scheduler = reset_scheduler
+        self._has_reset = False
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Reset LR at the start of training (after checkpoint load)."""
+        if self._has_reset:
+            return
+
+        model = kwargs.get("model")
+        optimizer = kwargs.get("optimizer")
+        lr_scheduler = kwargs.get("lr_scheduler")
+
+        # Only reset if resuming from checkpoint (state.global_step > 0)
+        if state.global_step > 0 and optimizer is not None:
+            logger.info(f"Resuming from step {state.global_step}, resetting LR to {self.target_lr}")
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = self.target_lr
+
+            # If using constant scheduler, we don't need to do anything else
+            # The scheduler will maintain the constant LR
+            logger.info(f"LR reset complete. Current LR: {optimizer.param_groups[0]['lr']}")
+
+        self._has_reset = True
 
 
 class PerTaskRewardCallback(TrainerCallback):
@@ -1033,21 +1067,29 @@ def grpo_function(
 
     per_task_callback = PerTaskRewardCallback(reward_tracker, debug_mode=DEBUG_MODE)
 
+    # Check if resuming from checkpoint to add LR reset callback
+    last_checkpoint = get_checkpoint(training_args)
+    callbacks = [per_task_callback]
+
+    if last_checkpoint is not None:
+        logger.info(f"Checkpoint detected at {last_checkpoint}, will reset LR to {training_args.learning_rate}")
+        lr_reset_callback = LRResetCallback(target_lr=training_args.learning_rate)
+        callbacks.append(lr_reset_callback)
+
     trainer = GRPOTrainer(
         model=model_args.model_name_or_path,
         reward_funcs=[reward_func],
         args=training_args,
         train_dataset=train_dataset,
         peft_config=get_peft_config(model_args),
-        callbacks=[per_task_callback],
+        callbacks=callbacks,
     )
 
     # -------------------------
     # Training loop
     # -------------------------
-    last_checkpoint = get_checkpoint(training_args)
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
+        logger.info(f"Resuming training from {last_checkpoint}.")
 
     logger.info(
         f'*** Starting training {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ***'

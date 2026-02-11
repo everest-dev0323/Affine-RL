@@ -11,7 +11,7 @@
 # ----------------------------------------------------------------------------
 model_name_or_path: tensorminer/Affine-5EEg3asikmXYbKk86gThAPrSyLG1ZnVZpMNkUJVd5UgU6cTU
 model_revision: main
-torch_dtype: bfloat16
+# torch_dtype: bfloat16
 attn_implementation: flash_attention_2
 trust_remote_code: true
 
@@ -19,8 +19,8 @@ trust_remote_code: true
 # LoRA Arguments
 # ----------------------------------------------------------------------------
 use_peft: true
-lora_r: 32
-lora_alpha: 64
+lora_r: 128
+lora_alpha: 256
 lora_dropout: 0.05
 lora_target_modules:
   - q_proj
@@ -47,7 +47,7 @@ bf16: true
 
 # Batch size (effective batch = per_device * gradient_accum * num_gpus)
 # 8 x H200: per_device=8, grad_accum=4, num_gpus=8 -> 256 samples per optimizer update (32 prompts), 16 optimizer updates per vllm/train switch turn
-per_device_train_batch_size: 8
+per_device_train_batch_size: 2
 gradient_accumulation_steps: 4
 
 # Gradient checkpointing (saves memory)
@@ -56,9 +56,10 @@ gradient_checkpointing_kwargs:
   use_reentrant: false
 
 # Optimizer
-learning_rate: 1.0e-6
-lr_scheduler_type: cosine
-warmup_ratio: 0.03
+learning_rate: 1.0e-4
+lr_scheduler_type: constant
+# warmup_ratio: 0.00
+warmup_steps: 50
 weight_decay: 0.01
 max_grad_norm: 1.0
 
@@ -73,12 +74,12 @@ beta: 0.001  # KL penalty coefficient
 max_prompt_length: 16384
 max_completion_length: 16384
 num_generations: 8  # Number of completions per prompt
-generation_batch_size: 4096  # 512 prompts × 8 completions
+generation_batch_size: 128  # 16 prompts × 8 completions
 
 # vLLM for fast generation (colocate mode - weights synced with training)
 use_vllm: true
 vllm_mode: colocate
-vllm_gpu_memory_utilization: 0.5
+vllm_gpu_memory_utilization: 0.6
 vllm_max_model_length: 32768  # 32K to match max_prompt_length + max_completion_length
 vllm_enable_sleep_mode: true
 
@@ -102,7 +103,7 @@ report_to:
 run_name: r1_grpo_4b_run1
 
 save_strategy: steps
-save_steps: 100
+save_steps: 50
 save_total_limit: 3
 
 seed: 42
