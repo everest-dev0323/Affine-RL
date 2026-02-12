@@ -1,0 +1,185 @@
+# Copyright (c) 2025 - Kimi K2.5 SFT Configuration for NeMo Automodel
+# Hardware: 8x H100 80GB GPUs (640GB total VRAM)
+# Dataset: Text-only conversations JSONL (no images)
+# Model: Kimi K2.5 with Native INT4 (595GB) - NO QAT needed, use standard LoRA
+# Reference: https://github.com/NVIDIA-NeMo/Automodel/blob/main/examples/vlm_finetune/kimi/kimi25vl_medpix.yaml
+
+# ============================================================================
+# Training Schedule (Conservative for memory)
+# ============================================================================
+step_scheduler:
+  global_batch_size: 32         # Reduced: 1 batch × 8 GPUs (no grad accum for memory)
+  local_batch_size: 1          # Per-GPU batch size (minimum)
+  gradient_accumulation_steps: 32
+  ckpt_every_steps: 100
+  val_every_steps: 100
+  max_steps: 1000              # Adjust based on dataset size
+
+# ============================================================================
+# Distributed Environment
+# ============================================================================
+dist_env:
+  backend: nccl
+  timeout_minutes: 60          # Increased for model loading + long sequences
+
+# ============================================================================
+# Random Number Generator
+# ============================================================================
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+# ============================================================================
+# Distributed Training Configuration
+# For 8x H100 GPUs with Kimi K2.5 (1T MoE model, 595GB INT4)
+# Memory-optimized: PP=8 to split model across GPUs
+# ============================================================================
+distributed:
+  tp_size: 1                   # Tensor parallelism (keep 1 for simplicity)
+  cp_size: 1                   # Context parallelism
+  pp_size: 8                   # Pipeline parallelism - CRITICAL for memory
+  ep_size: 1                   # Expert parallelism (keep 1 to avoid OOM)
+
+distributed_config:
+  _target_: nemo_automodel.components.distributed.config.FSDP2Config
+  sequence_parallel: false
+
+# ============================================================================
+# Pipeline Parallelism Configuration
+# ============================================================================
+autopipeline:
+  _target_: nemo_automodel.components.distributed.pipelining.config.PipelineConfig
+  pp_schedule: interleaved1f1b
+  pp_microbatch_size: 1
+  round_virtual_stages_to_pp_multiple: down
+  scale_grads_in_schedule: false
+  layers_per_stage: 8          # Kimi K2.5 has 61 layers, ~8 per stage for 8 GPUs
+  patch_inner_model: false
+  patch_causal_lm_model: false
+
+# ============================================================================
+# MoE Configuration
+# ============================================================================
+moe_config:
+  _target_: nemo_automodel.components.moe.config.MoEParallelizerConfig
+  activation_checkpointing: true  # CRITICAL for memory with 16K+ sequences
+
+# ============================================================================
+# Model Configuration
+# Native INT4 model - NO QAT needed (weights are already INT4 from pretraining)
+# ============================================================================
+model:
+  _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
+  pretrained_model_name_or_path: moonshotai/Kimi-K2.5
+  torch_dtype: bfloat16
+  trust_remote_code: true
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: te                   # TransformerEngine attention (Flash Attention)
+    linear: torch
+    rms_norm: torch
+    rope_fusion: false
+    enable_deepep: false       # Disabled (ep_size=1)
+    fake_balanced_gate: false
+    enable_hf_state_dict_adapter: true
+    enable_fsdp_optimizations: true
+
+# ============================================================================
+# LoRA Configuration (Parameter-Efficient Fine-Tuning)
+# Standard LoRA works with Native INT4 - NO QLoRA needed!
+# ============================================================================
+lora:
+  enabled: true
+  r: 8                         # Low rank for memory efficiency (can increase if stable)
+  alpha: 16                    # LoRA alpha (typically 2x rank)
+  dropout: 0.05
+  target_modules:              # Target BOTH attention AND MLP for knowledge injection
+    # Attention layers - controls reasoning flow/behavior
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    # MLP layers - stores factual knowledge (GAME RULES!)
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: none                   # Don't train biases
+  task_type: CAUSAL_LM
+
+# ============================================================================
+# Processor Configuration
+# ============================================================================
+processor:
+  _target_: transformers.AutoProcessor.from_pretrained
+  pretrained_model_name_or_path: moonshotai/Kimi-K2.5
+  trust_remote_code: true
+
+# ============================================================================
+# Checkpointing
+# ============================================================================
+checkpoint:
+  enabled: true
+  checkpoint_dir: checkpoints/kimi_k25_sft/
+  model_save_format: safetensors
+  save_consolidated: true
+
+# ============================================================================
+# Loss Function
+# ============================================================================
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+# ============================================================================
+# Dataset Configuration
+# Custom dataset with proper loss masking:
+# - Multi-turn conversations converted to text via chat template
+# - Only LAST assistant response contributes to loss
+# - All previous turns (user + earlier assistant) are masked
+# ============================================================================
+dataset:
+  _target_: scripts/sft/nemo_kimi_k25_dataset.py:make_kimi_k25_sft_dataset
+  path_or_dataset: dataset/total.jsonl
+  tokenizer_name_or_path: moonshotai/Kimi-K2.5
+  max_length: 24576            # Sequence length (start conservative)
+  include_reasoning: true      # Include reasoning_content in <think> blocks
+
+# ============================================================================
+# DataLoader Configuration
+# Using standard DataLoader since our dataset returns tokenized tensors
+# ============================================================================
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  num_workers: 4
+  pin_memory: true
+  # No custom collate_fn needed - dataset returns dict of tensors
+
+# ============================================================================
+# Optimizer Configuration (Only for LoRA parameters)
+# ============================================================================
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4                   # Higher LR for LoRA (typical: 1e-4 to 5e-4)
+  weight_decay: 0.01
+  betas:
+  - 0.9
+  - 0.95
+
+# ============================================================================
+# Freeze Configuration
+# For text-only SFT, freeze vision components
+# ============================================================================
+freeze_config:
+  freeze_embeddings: true     # Train embeddings for better text understanding
+  freeze_vision_tower: true    # Freeze vision (not used for text-only)
+  freeze_language_model: false # Train the language model
+
+# ============================================================================
+# Weights & Biases Logging (Optional)
+# ============================================================================
+wandb:
+  project: kimi-k25-sft
+  entity: nvidia-nemo-lora
+  name: kimi-k25-sft-conversations
+
