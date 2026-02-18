@@ -8,9 +8,9 @@
 # Training Schedule (Conservative for memory)
 # ============================================================================
 step_scheduler:
-  global_batch_size: 32         # Reduced: 1 batch × 8 GPUs (no grad accum for memory)
+  global_batch_size: 64         # Reduced: 1 batch × 8 GPUs (no grad accum for memory)
   local_batch_size: 1          # Per-GPU batch size (minimum)
-  gradient_accumulation_steps: 32
+  gradient_accumulation_steps: 64
   ckpt_every_steps: 100
   val_every_steps: 100
   max_steps: 1000              # Adjust based on dataset size
@@ -36,34 +36,48 @@ rng:
 # Memory-optimized: PP=8 to split model across GPUs
 # ============================================================================
 distributed:
+  strategy: fsdp2
+  # _target_: nemo_automodel.components.distributed.fsdp2.FSDP2Manager
   tp_size: 1                   # Tensor parallelism (keep 1 for simplicity)
   cp_size: 1                   # Context parallelism
   pp_size: 8                   # Pipeline parallelism - CRITICAL for memory
   ep_size: 1                   # Expert parallelism (keep 1 to avoid OOM)
-
-distributed_config:
-  _target_: nemo_automodel.components.distributed.config.FSDP2Config
+  
   sequence_parallel: false
+  activation_checkpointing: true
+  
+  pipeline:  # ← CORRECT - nested inside distributed
+      pp_schedule: interleaved1f1b
+      pp_microbatch_size: 1
+      round_virtual_stages_to_pp_multiple: down
+      scale_grads_in_schedule: false
+      layers_per_stage: 8
+      patch_inner_model: false
+      patch_causal_lm_model: false
+
+# distributed_config:
+#   _target_: nemo_automodel.components.distributed.config.FSDP2Config
+#   sequence_parallel: false
 
 # ============================================================================
 # Pipeline Parallelism Configuration
 # ============================================================================
-autopipeline:
-  _target_: nemo_automodel.components.distributed.pipelining.config.PipelineConfig
-  pp_schedule: interleaved1f1b
-  pp_microbatch_size: 1
-  round_virtual_stages_to_pp_multiple: down
-  scale_grads_in_schedule: false
-  layers_per_stage: 8          # Kimi K2.5 has 61 layers, ~8 per stage for 8 GPUs
-  patch_inner_model: false
-  patch_causal_lm_model: false
+# autopipeline:
+#   _target_: nemo_automodel.components.distributed.pipelining.config.PipelineConfig
+#   pp_schedule: interleaved1f1b
+#   pp_microbatch_size: 1
+#   round_virtual_stages_to_pp_multiple: down
+#   scale_grads_in_schedule: false
+#   layers_per_stage: 2          # Kimi K2.5 has 61 layers, ~8 per stage for 8 GPUs
+#   patch_inner_model: false
+#   patch_causal_lm_model: false
 
 # ============================================================================
 # MoE Configuration
 # ============================================================================
-moe_config:
-  _target_: nemo_automodel.components.moe.config.MoEParallelizerConfig
-  activation_checkpointing: true  # CRITICAL for memory with 16K+ sequences
+# moe_config:
+#   _target_: nemo_automodel.components.moe.MoEParallelizerConfig
+#   activation_checkpointing: true  # CRITICAL for memory with 16K+ sequences
 
 # ============================================================================
 # Model Configuration
@@ -71,7 +85,7 @@ moe_config:
 # ============================================================================
 model:
   _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
-  pretrained_model_name_or_path: moonshotai/Kimi-K2.5
+  pretrained_model_name_or_path: ./Kimi-K2.5
   torch_dtype: bfloat16
   trust_remote_code: true
   backend:
@@ -80,7 +94,7 @@ model:
     linear: torch
     rms_norm: torch
     rope_fusion: false
-    enable_deepep: false       # Disabled (ep_size=1)
+    enable_deepep: true       # Disabled (ep_size=1)
     fake_balanced_gate: false
     enable_hf_state_dict_adapter: true
     enable_fsdp_optimizations: true
@@ -112,7 +126,7 @@ lora:
 # ============================================================================
 processor:
   _target_: transformers.AutoProcessor.from_pretrained
-  pretrained_model_name_or_path: moonshotai/Kimi-K2.5
+  pretrained_model_name_or_path: ./Kimi-K2.5
   trust_remote_code: true
 
 # ============================================================================
@@ -139,10 +153,10 @@ loss_fn:
 # - All previous turns (user + earlier assistant) are masked
 # ============================================================================
 dataset:
-  _target_: scripts/sft/nemo_kimi_k25_dataset.py:make_kimi_k25_sft_dataset
-  path_or_dataset: dataset/total.jsonl
-  tokenizer_name_or_path: moonshotai/Kimi-K2.5
-  max_length: 24576            # Sequence length (start conservative)
+  _target_: nemo_kimi_k25_dataset.py:make_kimi_k25_sft_dataset
+  path_or_dataset: total.jsonl
+  tokenizer_name_or_path: ./Kimi-K2.5
+  max_length: 16384            # Sequence length (start conservative)
   include_reasoning: true      # Include reasoning_content in <think> blocks
 
 # ============================================================================
@@ -153,6 +167,7 @@ dataloader:
   _target_: torch.utils.data.DataLoader
   num_workers: 4
   pin_memory: true
+  shuffle: true
   # No custom collate_fn needed - dataset returns dict of tensors
 
 # ============================================================================

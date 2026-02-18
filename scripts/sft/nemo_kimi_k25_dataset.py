@@ -8,6 +8,7 @@
 # - Supports reasoning_content in <think> blocks
 
 import json
+import random
 import torch
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
@@ -31,6 +32,8 @@ class KimiK25SFTDataset(Dataset):
         max_length: int = 16000,
         num_samples_limit: Optional[int] = None,
         include_reasoning: bool = True,
+        shuffle: bool = True,
+        seed: Optional[int] = 42,
     ):
         """
         Args:
@@ -39,6 +42,8 @@ class KimiK25SFTDataset(Dataset):
             max_length: Maximum sequence length
             num_samples_limit: Optional limit on number of samples
             include_reasoning: Whether to include reasoning_content in <think> blocks
+            shuffle: Whether to shuffle the dataset
+            seed: Random seed for shuffling (for reproducibility)
         """
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -46,7 +51,15 @@ class KimiK25SFTDataset(Dataset):
 
         # Load raw conversations from JSONL
         self.conversations = self._load_jsonl(path_or_dataset, num_samples_limit)
-        print(f"Loaded {len(self.conversations)} conversations from {path_or_dataset}")
+
+        # Shuffle if requested
+        if shuffle:
+            if seed is not None:
+                random.seed(seed)
+            random.shuffle(self.conversations)
+            print(f"Loaded and shuffled {len(self.conversations)} conversations from {path_or_dataset} (seed={seed})")
+        else:
+            print(f"Loaded {len(self.conversations)} conversations from {path_or_dataset} (no shuffle)")
 
     def _load_jsonl(
         self,
@@ -166,6 +179,8 @@ def make_kimi_k25_sft_dataset(
     split: str = "train",
     num_samples_limit: Optional[int] = None,
     include_reasoning: bool = True,
+    shuffle: bool = True,
+    seed: Optional[int] = 42,
 ) -> KimiK25SFTDataset:
     """
     Factory function to create Kimi K2.5 SFT dataset.
@@ -178,6 +193,8 @@ def make_kimi_k25_sft_dataset(
         split: Dataset split (for compatibility)
         num_samples_limit: Optional sample limit
         include_reasoning: Whether to include reasoning_content in output
+        shuffle: Whether to shuffle the dataset
+        seed: Random seed for shuffling (for reproducibility)
 
     Returns:
         KimiK25SFTDataset instance
@@ -199,6 +216,8 @@ def make_kimi_k25_sft_dataset(
         max_length=max_length,
         num_samples_limit=num_samples_limit,
         include_reasoning=include_reasoning,
+        shuffle=shuffle,
+        seed=seed,
     )
 
 
