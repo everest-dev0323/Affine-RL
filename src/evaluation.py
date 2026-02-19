@@ -303,6 +303,77 @@ async def evaluate_one(
     }
 
 
+async def evaluate_one_api(
+    model: str,
+    base_url: str,
+    env: str,
+    task_id: int,
+    api_key: str,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluate a model on a single task.
+
+    Args:
+        model: Model name
+        base_url: Base URL for the API
+        api_key: API key for the model
+        env: Environment name. Supported:
+            - Affine: 'sat', 'abd', 'abd-v2', 'ded', 'ded-v2'
+            - PrimeIntellect: 'cde', 'mth', 'lgc', 'sci'
+            - SWE-bench: 'swe-pro'
+        task_id: Task ID to evaluate
+        seed: Optional random seed for reproducibility (not used for AgentGym)
+
+    Returns:
+        dict with keys:
+            - score: float (evaluation score)
+            - success: bool (whether task was successful)
+            - time_taken: float (seconds taken)
+            - rollout: list of dict with 'role' and 'content' keys (conversation history)
+    """
+    env_lower = env.lower()
+
+    actor_cls = ACTOR_MAPPING.get(env_lower)
+
+    # Initialize actor
+    actor = actor_cls()
+
+    # Build evaluation kwargs
+    eval_kwargs = {
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "task_id": task_id,
+    }
+
+    # Add task_type for specific environments
+    if env_lower in ENVS_WITH_TASK_TYPE:
+        eval_kwargs["task_type"] = get_base_task_name(env)
+
+    # Add seed if provided
+    if seed is not None:
+        eval_kwargs["seed"] = seed
+
+    if env_lower == "swe-pro":
+        eval_kwargs["max_iterations"] = 1
+
+    # Run evaluation
+    result = await actor.evaluate(**eval_kwargs)
+
+    # Extract rollout from result
+    rollout = []
+    if "extra" in result and "conversation" in result["extra"]:
+        rollout = result["extra"]["conversation"]
+
+    return {
+        "score": result.get("score", 0.0),
+        "success": result.get("success", False),
+        "time_taken": result.get("time_taken", 0.0),
+        "rollout": rollout,
+    }
+
+
 async def evaluate_env(
     model: AutoModelForCausalLM,
     env: str,
@@ -347,6 +418,59 @@ async def evaluate_env(
             seed=seed,
             max_rounds=max_rounds,
             env_server_host=env_server_host,
+        )
+        results.append(result)
+        print("-"*60)
+        print(f"task id: {task_id}, score: {result['score']}")
+
+    # Calculate average score
+    avg_score = sum(r["score"] for r in results) / len(results) if results else 0.0
+
+    return {
+        "score": avg_score,
+        "extra": results,
+    }
+
+
+async def evaluate_env_api(
+    model: str,
+    base_url: str,
+    api_key: str,
+    env: str,
+    task_ids: List[int],
+    seed: Optional[int] = None,
+    max_rounds: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluate a model on multiple tasks in an environment.
+
+    Args:
+        model: Model name
+        base_url: Base URL for the API
+        api_key: API key for the model
+        env: Environment name. Supported:
+            - Affine: 'sat', 'abd', 'abd-v2', 'ded', 'ded-v2'
+            - PrimeIntellect: 'cde', 'mth', 'lgc', 'sci'
+            - SWE-bench: 'swe-pro'
+            - AgentGym: 'alfworld', 'sciworld', 'textcraft', 'webshop', 'babyai'
+        task_ids: List of task IDs to evaluate
+        seed: Optional random seed for reproducibility (not used for AgentGym)
+        max_rounds: Maximum interaction rounds for AgentGym environments
+
+    Returns:
+        dict with keys:
+            - score: float (average score across all tasks)
+            - extra: list of evaluate_one results for each task
+    """
+    results = []
+    for task_id in task_ids:
+        result = await evaluate_one_api(
+            model=model,  # Model name
+            base_url=base_url,  # Base URL for the API
+            api_key=api_key,  # API key for the model
+            task_id=task_id,  # Task ID to evaluate
+            seed=seed,  # Optional random seed for reproducibility
+            max_rounds=max_rounds,  # Maximum interaction rounds for AgentGym environments
         )
         results.append(result)
         print("-"*60)
