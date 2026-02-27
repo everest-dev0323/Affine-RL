@@ -16,19 +16,17 @@ import sys
 import os
 import json
 import random
-import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 import affinetes as af_env
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
 # Load environment variables
 load_dotenv()
 
 from src import get_base_task_name
+from src.utils import load_config_from_yaml
 
 # Environment name to port mapping (from .env)
 ENVIRONMENT_PORTS = {
@@ -62,8 +60,7 @@ ENVS_WITH_TASK_TYPE = {'abd-v2', 'ded-v2', 'sat'}
 
 def load_config(config_path: str) -> Dict:
     """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+    return load_config_from_yaml(config_path)
 
 
 def sample_task_ids(task_range: Dict, num_samples: int, seed: int) -> List[int]:

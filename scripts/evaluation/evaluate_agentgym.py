@@ -32,8 +32,6 @@ from agentenv.envs import (
 from agentenv.trainer.distributed_evaluator import DistributedEvaluator
 from agentenv.controller import Agent, ChatMLTemplate
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
 # Load environment variables
 load_dotenv()
 
