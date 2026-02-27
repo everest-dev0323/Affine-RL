@@ -14,9 +14,12 @@ def get_base_task_name(env_name: str) -> str:
     return env_name
 
 
-# Lazy import for evaluation functions to avoid circular imports
+# Lazy import for evaluation functions to avoid circular imports at package load.
 def __getattr__(name):
-    if name in ("evaluate_one", "evaluate_env"):
-        from src.evaluation import evaluate_one, evaluate_env
-        return locals()[name]
+    if name == "evaluate_one":
+        from src.evaluation import evaluate_one
+        return evaluate_one
+    if name == "evaluate_env":
+        from src.evaluation import evaluate_env
+        return evaluate_env
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
