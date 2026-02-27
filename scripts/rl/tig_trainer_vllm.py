@@ -28,11 +28,7 @@ from trl import GRPOConfig, GRPOTrainer
 from unsloth import FastLanguageModel
 
 from src.evaluation import reward_response
-
-
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+from src.utils import load_config_from_yaml
 
 
 class PerTaskRewardTracker:
@@ -202,7 +198,7 @@ def main():
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = load_config_from_yaml(args.config)
     use_wandb = cfg.get("use_wandb", False)
 
     # Initialize wandb early if enabled

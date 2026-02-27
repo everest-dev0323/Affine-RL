@@ -25,13 +25,12 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-import yaml
+from src.utils import load_config_from_yaml
 
 
 def load_config(path: str) -> dict:
     """Load configuration from YAML file."""
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+    return load_config_from_yaml(path)
 
 
 def load_dataset(dataset_path: str, max_data_per_task: int = 10000) -> List[Dict]:

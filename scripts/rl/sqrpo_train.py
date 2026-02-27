@@ -33,7 +33,6 @@ import transformers
 import torch
 import torch.nn.functional as F
 import wandb
-import yaml
 from accelerate import Accelerator
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -42,19 +41,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftModel
 
 
-def load_config_from_yaml(config_path: str) -> dict:
-    """
-    Load configuration from a YAML file.
-
-    Args:
-        config_path: Path to the YAML configuration file
-
-    Returns:
-        Dictionary containing the configuration values
-    """
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config if config else {}
+from src.utils import load_config_from_yaml
 
 
 def parse_args_with_config():

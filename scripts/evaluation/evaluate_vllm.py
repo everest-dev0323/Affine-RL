@@ -17,8 +17,6 @@ from typing import Optional
 from dotenv import load_dotenv
 import affinetes as af_env
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
 # Load environment variables
 load_dotenv()
 

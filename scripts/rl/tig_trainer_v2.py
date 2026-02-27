@@ -40,13 +40,7 @@ import yaml
 from unsloth import FastLanguageModel
 
 from src.evaluation import reward_response
-
-
-def load_config_from_yaml(config_path: str) -> dict:
-    """Load configuration from a YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config if config else {}
+from src.utils import load_config_from_yaml
 
 
 @dataclass
