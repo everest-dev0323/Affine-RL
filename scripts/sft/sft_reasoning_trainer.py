@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+from dataclasses import dataclass
 import gc
 import json
 import random
@@ -41,8 +42,13 @@ def load_config_from_yaml(config_path: str) -> dict:
     return config if config else {}
 
 
+@dataclass
 class SFTReasoningConfig:
-    """Configuration for SFT Reasoning training."""
+    """Configuration for SFT Reasoning training.
+
+    All fields have sensible defaults. Override any value by loading
+    from a YAML config file via ``--config``.
+    """
 
     # Model configuration
     model_name: str = "Qwen/Qwen3-14B"

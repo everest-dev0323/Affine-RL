@@ -23,6 +23,7 @@ Usage:
 import argparse
 import asyncio
 import copy
+from dataclasses import dataclass, field
 from datetime import datetime
 import gc
 import json
@@ -48,68 +49,99 @@ def load_config_from_yaml(config_path: str) -> dict:
     return config if config else {}
 
 
+@dataclass
 class TiGConfig:
-    """Configuration for TiG training."""
+    """Configuration for TiG training.
 
-    # Model configuration
-    model_name: str
-    load_in_4bit: bool
-    load_in_8bit: bool
-    max_seq_length: int
+    All fields have sensible defaults drawn from ``config/tig.yaml``.
+    Override any field by providing a YAML config file via ``--config``.
 
+    Note:
+        ``model_name`` has no universal default and **must** be set via the
+        YAML config file before the trainer is initialised.
+    """
+
+    # ------------------------------------------------------------------
+    # Model
+    # ------------------------------------------------------------------
+    model_name: str = ""                          # Required: set via YAML
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
+    max_seq_length: int = 16384
+
+    # ------------------------------------------------------------------
     # Dataset
-    dataset_path: str
-    max_data_per_task: int
+    # ------------------------------------------------------------------
+    dataset_path: str = "data"
+    max_data_per_task: int = 10000
 
-    # LoRA configuration
-    lora_r: int
-    lora_alpha: int
-    lora_dropout: float
-    lora_target_modules = None
+    # ------------------------------------------------------------------
+    # LoRA
+    # ------------------------------------------------------------------
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.0
+    lora_target_modules: Optional[List[str]] = None
 
-    # Unsloth optimizations
-    use_gradient_checkpointing = "unsloth"
-    use_rslora: bool
-    use_dora: bool
+    # ------------------------------------------------------------------
+    # Unsloth optimisations
+    # ------------------------------------------------------------------
+    use_gradient_checkpointing: str = "unsloth"
+    use_rslora: bool = False
+    use_dora: bool = False
 
-    # Training configuration
-    num_epochs: int
-    learning_rate: float
-    max_grad_norm: float
-    gradient_accumulation_steps: int
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    num_epochs: int = 2
+    learning_rate: float = 1e-5
+    max_grad_norm: float = 1.0
+    gradient_accumulation_steps: int = 8
 
-    # TiG/GRPO specific parameters
-    batch_size: int
-    num_generations: int # G completions per state (paper uses 4-8)
-    max_new_tokens: int # Max completion length
-    temperature: float  # Sampling temperature
-    clip_epsilon: float  # PPO clip range
-    clip_epsilon_high: float
-    kl_coef: float
-    train_micro_batch_size: int = 4  # Micro-batch size for training forward pass (to avoid OOM)
+    # ------------------------------------------------------------------
+    # TiG / GRPO
+    # ------------------------------------------------------------------
+    batch_size: int = 4
+    num_generations: int = 8          # G completions per state (paper uses 4–8)
+    max_new_tokens: int = 8196        # Max completion length
+    temperature: float = 1.0          # Sampling temperature
+    clip_epsilon: float = 0.2         # PPO clip range (lower bound)
+    clip_epsilon_high: float = 0.5    # PPO clip range (upper bound, DAPO-style)
+    kl_coef: float = 0.001            # KL-divergence penalty weight
+    train_micro_batch_size: int = 4   # Reduce if GPU OOM during training forward pass
 
-    # Checkpoint settings
-    checkpoint_dir: str
-    save_steps: int
-    ref_replace_steps: int = 200  # Replace reference model every N steps
-    keep_last_n_checkpoints: int
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+    checkpoint_dir: str = "./checkpoints/tig"
+    save_steps: int = 10
+    ref_replace_steps: int = 200      # Replace reference model every N steps
+    keep_last_n_checkpoints: int = 3
 
-    # WandB settings
-    use_wandb: bool
-    wandb_project: str
-    wandb_run_name: str
+    # ------------------------------------------------------------------
+    # WandB
+    # ------------------------------------------------------------------
+    use_wandb: bool = True
+    wandb_project: str = "tig-training"
+    wandb_run_name: str = "tig-experiment"
 
-    # Trajectory logging settings
+    # ------------------------------------------------------------------
+    # Trajectory logging
+    # ------------------------------------------------------------------
     save_trajectories: bool = True
     trajectory_dir: str = "trajectories"
 
-    # Length penalty settings
-    length_penalty_weight: float = 0.0  # Set > 0 to enable length penalty
-    length_penalty_target: int = 512    # No penalty below this token count
-    length_penalty_max: int = 2048      # For normalization (typically same as max_new_tokens)
+    # ------------------------------------------------------------------
+    # Length penalty  (set weight > 0 to enable)
+    # ------------------------------------------------------------------
+    length_penalty_weight: float = 0.0   # 0 = disabled
+    length_penalty_target: int = 512     # No penalty below this token count
+    length_penalty_max: int = 2048       # Normalisation ceiling
 
+    # ------------------------------------------------------------------
     # Reproducibility
-    seed: int
+    # ------------------------------------------------------------------
+    seed: int = 42
 
 
 class TiGTrainer:

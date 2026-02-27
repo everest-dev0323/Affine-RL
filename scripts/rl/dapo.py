@@ -1,9 +1,10 @@
 import random
 import asyncio
+from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 from unsloth import FastLanguageModel
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import gc
 import wandb
@@ -54,47 +55,80 @@ class TaskDataset:
         return samples
 
 
-class DAPO_Config:
+@dataclass
+class DapoConfig:
+    """Configuration for DAPO (GRPO + DAPO) training.
+
+    All fields have sensible defaults. Override any value by setting the
+    corresponding attribute after instantiation or by loading from a YAML file.
+
+    Note:
+        ``model_name`` has no universal default and **must** be set (e.g. from
+        the ``MODEL_NAME`` environment variable) before the trainer is created.
+    """
+
+    # ------------------------------------------------------------------
     # Model
-    model_name: str = ""
-    learning_rate = 2e-5
-    num_samples_per_prompt = 2
-    # LoRA settings
-    lora_r = 16
-    lora_alpha = 32
-    lora_dropout = 0.05
-    lora_target_modules = None
-    use_token_level_loss = False
-    max_grad_norm = 1.0
-    # Memory management
-    gradient_accumulation_steps = 8
-    load_in_4bit = False
-    load_in_8bit = False
-    max_seq_length = 8192
-    max_new_tokens = 256
-    # DAPO
-    clip_epsilon = 0.2
-    clip_epsilon_high = 0.5
-    kl_coef = 0.01
-    
-    # Unsloth optimizations
-    use_gradient_checkpointing = "unsloth"
-    use_rslora = False
-    use_dora = False
-    # WandB settings
-    use_wandb = True
-    wandb_project = "DAPO-training"
-    wandb_run_name = "DAPO-experiment-1"
-    wandb_config = {
-        'dataset': 'mixed_tasks',
-        'note': 'GRPO with DAPO on mixed task dataset'
-    }
-    # Checkpoint settings
-    checkpoint_dir="./checkpoints"
-    save_steps=100  # Save every 100 training steps
-    keep_last_n_checkpoints=3  # Keep only last 3 checkpoints
-    # Multi-turn settings
-    advantage_decay_gamma=0.95
+    # ------------------------------------------------------------------
+    model_name: str = ""                          # Required: set via env / CLI
+    max_seq_length: int = 8192
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
+
+    # ------------------------------------------------------------------
+    # LoRA
+    # ------------------------------------------------------------------
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: Optional[List[str]] = None
+
+    # ------------------------------------------------------------------
+    # Unsloth optimisations
+    # ------------------------------------------------------------------
+    use_gradient_checkpointing: str = "unsloth"
+    use_rslora: bool = False
+    use_dora: bool = False
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    learning_rate: float = 2e-5
+    max_grad_norm: float = 1.0
+    gradient_accumulation_steps: int = 8
+    num_samples_per_prompt: int = 2
+    max_new_tokens: int = 256
+    use_token_level_loss: bool = False
+
+    # ------------------------------------------------------------------
+    # DAPO / PPO
+    # ------------------------------------------------------------------
+    clip_epsilon: float = 0.2         # PPO clip range (lower bound)
+    clip_epsilon_high: float = 0.5    # PPO clip range (upper bound, DAPO-style)
+    kl_coef: float = 0.01             # KL-divergence penalty weight
+
+    # ------------------------------------------------------------------
+    # Multi-turn
+    # ------------------------------------------------------------------
+    advantage_decay_gamma: float = 0.95
+
+    # ------------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------------
+    checkpoint_dir: str = "./checkpoints"
+    save_steps: int = 100             # Save every N training steps
+    keep_last_n_checkpoints: int = 3
+
+    # ------------------------------------------------------------------
+    # WandB
+    # ------------------------------------------------------------------
+    use_wandb: bool = True
+    wandb_project: str = "DAPO-training"
+    wandb_run_name: str = "DAPO-experiment-1"
+    wandb_config: Dict[str, Any] = field(default_factory=lambda: {
+        "dataset": "mixed_tasks",
+        "note": "GRPO with DAPO on mixed task dataset",
+    })
 
 
 class GRPO_DAPO_Trainer:
@@ -113,7 +147,7 @@ class GRPO_DAPO_Trainer:
     
     def __init__(
         self,
-        config: DAPO_Config
+        config: DapoConfig
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -1105,7 +1139,7 @@ if __name__ == "__main__":
     # 2. Initialize trainer with Unsloth and WandB
     # =====================================================================
     
-    config = DAPO_Config()
+    config = DapoConfig()
     config.model_name = os.getenv("MODEL_NAME")
     
     trainer = GRPO_DAPO_Trainer(
