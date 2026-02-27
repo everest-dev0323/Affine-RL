@@ -1,7 +1,7 @@
 ## Environment Setup
 
 ```bash
-git clone https://github.com/Bambuuai/Affine-H.git --recurse-submodules
+git clone https://github.com/Bambuuai/Affine-RL.git --recurse-submodules
 ```
 
 ### 1. Create Conda Environment
